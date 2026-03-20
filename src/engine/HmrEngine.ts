@@ -1,47 +1,40 @@
-import { DEFAULT_ENGINE_CONFIG } from "./defaults";
-import { buildActiveBricks } from "./field/brickPool";
-import { applyExcitations, averageFieldMetrics, sampleField } from "./field/fieldMath";
+import { cloneDefaultConfig, mergeConfig } from "./config";
 import { getPresetById, SCENE_PRESETS } from "./presets";
-import { SurfaceTracker } from "./surface/surfaceTracker";
-import type { EngineConfig, EngineFrameState, FieldClusterSpec, ScenePreset } from "./types";
+import type {
+  EngineConfig,
+  EngineFrameState,
+  FieldClusterSpec,
+  ScenePreset
+} from "./types";
+import type {
+  SimulationWorkerRequest,
+  SimulationWorkerResponse
+} from "./simulation/workerProtocol";
 import { HmrRenderer } from "./webgpu/renderer";
 
-function mergeConfig(base: EngineConfig, partial?: Partial<EngineConfig>): EngineConfig {
-  if (!partial) {
-    return structuredClone(base);
-  }
-  return {
-    ...base,
-    ...partial,
-    quality: {
-      ...base.quality,
-      ...partial.quality
-    },
-    spawn: {
-      ...base.spawn,
-      ...partial.spawn
-    }
-  };
+interface LatestFrame {
+  clusters: FieldClusterSpec[];
+  packedPoints: ArrayBuffer;
+  pointCount: number;
+  frameState: EngineFrameState;
 }
 
 export class HmrEngine {
-  private readonly tracker = new SurfaceTracker();
   private readonly renderer: HmrRenderer;
+  private worker: Worker | null = null;
   private config: EngineConfig;
   private preset: ScenePreset = getPresetById(SCENE_PRESETS[0].id);
-  private animatedClusters: FieldClusterSpec[] = this.preset.clusters;
   private frameState: EngineFrameState;
-  private accumulator = 0;
-  private frame = 0;
-  private time = 0;
-  private fpsSmoother = 60;
+  private latestFrame: LatestFrame | null = null;
   private initialized = false;
-  private activeBricks = 0;
+  private workerBusy = false;
+  private pendingDt = 0;
+  private initResolver: (() => void) | null = null;
+  private initRejecter: ((error: Error) => void) | null = null;
 
   constructor(private readonly canvas: HTMLCanvasElement, config?: Partial<EngineConfig>) {
-    this.config = mergeConfig(DEFAULT_ENGINE_CONFIG, config);
+    this.config = mergeConfig(cloneDefaultConfig(), config);
     this.renderer = new HmrRenderer(canvas, this.config);
-    this.tracker.configure(this.config);
     this.frameState = {
       time: 0,
       frame: 0,
@@ -60,14 +53,19 @@ export class HmrEngine {
     if (this.initialized) {
       return;
     }
+
     await this.renderer.init();
-    this.resetSimulation();
+    await this.initSimulationWorker();
     this.initialized = true;
   }
 
   loadPreset(presetOrId: ScenePreset | string): void {
     this.preset = typeof presetOrId === "string" ? getPresetById(presetOrId) : structuredClone(presetOrId);
-    this.resetSimulation();
+    this.pendingDt = 0;
+    this.postWorkerMessage({
+      type: "loadPreset",
+      preset: this.preset
+    });
   }
 
   updateParams(params: {
@@ -77,8 +75,11 @@ export class HmrEngine {
   }): void {
     if (params.config) {
       this.config = mergeConfig(this.config, params.config);
-      this.tracker.configure(this.config);
       this.renderer.updateConfig(this.config);
+      this.postWorkerMessage({
+        type: "updateConfig",
+        config: params.config
+      });
     }
     if (params.post) {
       this.preset.post = {
@@ -98,27 +99,22 @@ export class HmrEngine {
     if (!this.initialized) {
       return;
     }
-
-    this.fpsSmoother = this.fpsSmoother * 0.92 + (1 / Math.max(dt, 1e-4)) * 0.08;
-    this.accumulator += dt;
-    let subSteps = 0;
-    while (this.accumulator >= this.config.fixedTimeStep && subSteps < this.config.maxSubSteps) {
-      this.advanceFixedStep(this.config.fixedTimeStep);
-      this.accumulator -= this.config.fixedTimeStep;
-      subSteps += 1;
-    }
+    this.pendingDt += dt;
+    this.flushWorkerStep();
   }
 
   render(): void {
-    if (!this.initialized) {
+    if (!this.initialized || !this.latestFrame) {
       return;
     }
+
     this.renderer.render({
-      clusters: this.animatedClusters,
-      points: this.tracker.getPoints(),
+      clusters: this.latestFrame.clusters,
+      packedPoints: this.latestFrame.packedPoints,
+      pointCount: this.latestFrame.pointCount,
       camera: this.preset.camera,
       post: this.preset.post,
-      frameState: this.frameState
+      frameState: this.latestFrame.frameState
     });
   }
 
@@ -136,100 +132,102 @@ export class HmrEngine {
   }
 
   getFrameState(): EngineFrameState {
-    return this.frameState;
-  }
-
-  getPreset(): ScenePreset {
-    return this.preset;
+    return this.latestFrame?.frameState ?? this.frameState;
   }
 
   dispose(): void {
+    this.postWorkerMessage({ type: "dispose" });
+    this.worker?.terminate();
+    this.worker = null;
     this.renderer.dispose();
   }
 
-  private resetSimulation(): void {
-    this.time = 0;
-    this.frame = 0;
-    this.accumulator = 0;
-    this.animatedClusters = applyExcitations(this.preset.clusters, this.preset.excitations, this.time);
-    this.tracker.seed(this.animatedClusters, this.time);
-    this.activeBricks = 0;
-    this.frameState = {
-      ...this.frameState,
-      time: 0,
-      frame: 0,
-      pointCount: this.tracker.getPoints().length,
-      activeBricks: 0,
-      averageDensity: 0,
-      averageCoherence: 0,
-      maxFlow: 0,
-      shellCoverage: this.tracker.getCoverage(),
-      quality: structuredClone(this.config.quality)
+  private async initSimulationWorker(): Promise<void> {
+    this.worker = new Worker(new URL("./simulation/simulation.worker.ts", import.meta.url), {
+      type: "module"
+    });
+
+    this.worker.onmessage = (event: MessageEvent<SimulationWorkerResponse>) => {
+      const message = event.data;
+      if (message.type === "error") {
+        const error = new Error(message.message);
+        if (this.initRejecter) {
+          this.initRejecter(error);
+          this.initRejecter = null;
+          this.initResolver = null;
+        }
+        throw error;
+      }
+
+      this.latestFrame = {
+        clusters: message.clusters,
+        packedPoints: (() => {
+          const copy = new ArrayBuffer(message.packedPoints.byteLength);
+          new Uint8Array(copy).set(message.packedPoints);
+          return copy;
+        })(),
+        pointCount: message.pointCount,
+        frameState: message.frameState
+      };
+      this.frameState = message.frameState;
+      this.workerBusy = false;
+
+      if (this.initResolver) {
+        this.initResolver();
+        this.initResolver = null;
+        this.initRejecter = null;
+      }
+
+      this.flushWorkerStep();
     };
+
+    this.worker.onerror = (event) => {
+      const error = new Error(event.message || "Simulation worker crashed.");
+      if (this.initRejecter) {
+        this.initRejecter(error);
+        this.initRejecter = null;
+        this.initResolver = null;
+      } else {
+        throw error;
+      }
+    };
+
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      this.initResolver = resolve;
+      this.initRejecter = reject;
+    });
+
+    this.workerBusy = true;
+    this.worker.postMessage({
+      type: "init",
+      config: this.config,
+      preset: this.preset
+    } satisfies SimulationWorkerRequest);
+
+    await readyPromise;
   }
 
-  private advanceFixedStep(dt: number): void {
-    this.time += dt;
-    this.frame += 1;
-    this.preset.camera.yaw += this.preset.camera.orbitSpeed * dt;
-    this.animatedClusters = applyExcitations(this.preset.clusters, this.preset.excitations, this.time);
-    this.tracker.step(this.animatedClusters, this.time, dt);
-
-    const pointSamples = this.tracker
-      .getPoints()
-      .slice(0, 96)
-      .map((point) => sampleField(this.animatedClusters, point.position, this.time, this.config.surfaceThreshold));
-    const metrics = averageFieldMetrics(pointSamples);
-    const activeBricks = buildActiveBricks(
-      this.animatedClusters,
-      this.time,
-      this.config.brickBudget,
-      this.config.brickResolution,
-      this.config.surfaceThreshold
-    );
-
-    this.activeBricks = activeBricks.length;
-    this.applyLod(metrics.maxFlow, activeBricks.length);
-
-    this.frameState = {
-      time: this.time,
-      frame: this.frame,
-      fps: this.fpsSmoother,
-      pointCount: this.tracker.getPoints().length,
-      activeBricks: activeBricks.length,
-      averageDensity: metrics.rho,
-      averageCoherence: metrics.coherence,
-      maxFlow: metrics.maxFlow,
-      shellCoverage: this.tracker.getCoverage(),
-      quality: structuredClone(this.config.quality)
-    };
-  }
-
-  private applyLod(maxFlow: number, activeBricks: number): void {
-    const overload = Math.max(
-      maxFlow / Math.max(0.1, this.config.lodFlowLimit),
-      activeBricks / Math.max(1, this.config.brickBudget)
-    );
-
-    if (overload > 1.05) {
-      this.config.quality.raymarchSteps = Math.max(24, Math.floor(this.config.quality.raymarchSteps * 0.97));
-      this.config.quality.shellDensity = Math.max(0.58, this.config.quality.shellDensity * 0.992);
-      this.config.quality.pointSizeScale = Math.max(0.85, this.config.quality.pointSizeScale * 0.997);
-    } else {
-      this.config.quality.raymarchSteps = Math.min(
-        DEFAULT_ENGINE_CONFIG.quality.raymarchSteps,
-        this.config.quality.raymarchSteps + 1
-      );
-      this.config.quality.shellDensity = Math.min(
-        DEFAULT_ENGINE_CONFIG.quality.shellDensity,
-        this.config.quality.shellDensity + 0.005
-      );
-      this.config.quality.pointSizeScale = Math.min(
-        DEFAULT_ENGINE_CONFIG.quality.pointSizeScale,
-        this.config.quality.pointSizeScale + 0.003
-      );
+  private flushWorkerStep(): void {
+    if (!this.worker || this.workerBusy || this.pendingDt <= 0) {
+      return;
     }
-    this.tracker.configure(this.config);
-    this.renderer.updateConfig(this.config);
+
+    const dt = Math.min(0.05, this.pendingDt);
+    this.pendingDt = Math.max(0, this.pendingDt - dt);
+    this.workerBusy = true;
+    this.worker.postMessage({
+      type: "step",
+      dt
+    } satisfies SimulationWorkerRequest);
+  }
+
+  private postWorkerMessage(message: SimulationWorkerRequest): void {
+    if (!this.worker) {
+      return;
+    }
+    if (message.type === "step") {
+      this.workerBusy = true;
+    }
+    this.worker.postMessage(message);
   }
 }

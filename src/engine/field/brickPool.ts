@@ -1,6 +1,4 @@
-import type { ActiveBrick, FieldClusterSpec, Vec3 } from "../types";
-import { vec3 } from "../math/vec3";
-import { sampleField } from "./fieldMath";
+import type { ActiveBrick, FieldClusterSpec, PhotonPoint, Vec3 } from "../types";
 
 function bucketCoord(position: Vec3, brickSize: number): Vec3 {
   return [
@@ -11,44 +9,50 @@ function bucketCoord(position: Vec3, brickSize: number): Vec3 {
 }
 
 export function buildActiveBricks(
+  points: PhotonPoint[],
   clusters: FieldClusterSpec[],
-  time: number,
   brickBudget: number,
-  brickResolution: number,
-  surfaceThreshold: number
+  brickResolution: number
 ): ActiveBrick[] {
   const brickSize = 2 / brickResolution;
   const bucketMap = new Map<string, ActiveBrick>();
 
-  for (const cluster of clusters) {
-    const extent = Math.max(1.3, cluster.structural.formRank + cluster.visual.surfaceThickness * 2.5);
-    for (let x = -extent; x <= extent; x += brickSize) {
-      for (let y = -extent; y <= extent; y += brickSize) {
-        for (let z = -extent; z <= extent; z += brickSize) {
-          const position = vec3.add(cluster.center, [x, y, z]);
-          const sample = sampleField(clusters, position, time, surfaceThreshold);
-          const interest = sample.rho + Math.abs(sample.shellDistance) * 0.08 + sample.coherence * 0.3;
-          if (interest < surfaceThreshold * 0.35) {
-            continue;
-          }
-          const coord = bucketCoord(position, brickSize);
-          const key = coord.join(":");
-          const existing = bucketMap.get(key);
-          if (existing) {
-            existing.energy = Math.max(existing.energy, interest);
-            if (!existing.clusterIds.includes(cluster.id)) {
-              existing.clusterIds.push(cluster.id);
-            }
-            continue;
-          }
-          bucketMap.set(key, {
-            coord,
-            energy: interest,
-            clusterIds: [cluster.id]
-          });
-        }
+  for (const point of points) {
+    const coord = bucketCoord(point.position, brickSize);
+    const key = coord.join(":");
+    const energy = point.brightness * (0.7 + point.coherence * 0.8) + point.density * 0.18;
+    const existing = bucketMap.get(key);
+    if (existing) {
+      existing.energy = Math.max(existing.energy, energy);
+      if (!existing.clusterIds.includes(point.clusterAffinity)) {
+        existing.clusterIds.push(point.clusterAffinity);
       }
+      continue;
     }
+    bucketMap.set(key, {
+      coord,
+      energy,
+      clusterIds: [point.clusterAffinity]
+    });
+  }
+
+  for (const cluster of clusters) {
+    const coord = bucketCoord(cluster.center, brickSize);
+    const key = coord.join(":");
+    const energy = cluster.structural.kernelDensity * cluster.structural.coherence + cluster.visual.emissionGain * 0.35;
+    const existing = bucketMap.get(key);
+    if (existing) {
+      existing.energy = Math.max(existing.energy, energy);
+      if (!existing.clusterIds.includes(cluster.id)) {
+        existing.clusterIds.push(cluster.id);
+      }
+      continue;
+    }
+    bucketMap.set(key, {
+      coord,
+      energy,
+      clusterIds: [cluster.id]
+    });
   }
 
   return [...bucketMap.values()]

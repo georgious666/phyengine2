@@ -3,25 +3,25 @@ import type {
   EngineConfig,
   EngineFrameState,
   FieldClusterSpec,
-  PhotonPoint,
   SceneCamera,
   ScenePostSettings,
   Vec3
 } from "../types";
+import { FLOATS_PER_POINT } from "../renderPacking";
 import { createWebGpuContext, type WebGpuContextResources } from "./context";
 import { orbitCamera } from "../math/mat4";
 import { vec3 } from "../math/vec3";
 
 const MAX_CLUSTERS = 8;
 const FLOATS_PER_CLUSTER = 16;
-const FLOATS_PER_POINT = 16;
 const FLOATS_PER_METRIC = 4;
 const FRAME_UNIFORM_FLOATS = 32;
 const QUAD_VERTEX_COUNT = 6;
 
 interface RendererScene {
   clusters: FieldClusterSpec[];
-  points: PhotonPoint[];
+  packedPoints: ArrayBuffer;
+  pointCount: number;
   camera: SceneCamera;
   post: ScenePostSettings;
   frameState: EngineFrameState;
@@ -82,21 +82,6 @@ function packCluster(cluster: FieldClusterSpec): number[] {
     cluster.visual.surfaceThickness,
     cluster.visual.spectralSpread
   ];
-}
-
-function pointStateIndex(state: PhotonPoint["state"]): number {
-  switch (state) {
-    case "birthing":
-      return 1;
-    case "dying":
-      return 2;
-    case "nodal":
-      return 3;
-    case "drifting":
-      return 4;
-    default:
-      return 0;
-  }
 }
 
 function cameraBasis(camera: SceneCamera): { eye: Vec3; right: Vec3; up: Vec3; forward: Vec3 } {
@@ -169,7 +154,7 @@ export class HmrRenderer {
 
     this.writeFrameUniforms(scene);
     this.writeClusterBuffer(scene.clusters);
-    this.writePointBuffer(scene.points);
+    this.writePointBuffer(scene.packedPoints, scene.pointCount);
 
     const commandEncoder = this.gpu.device.createCommandEncoder({
       label: "hmr-command-encoder"
@@ -180,7 +165,7 @@ export class HmrRenderer {
     });
     computePass.setPipeline(this.pipelines.shellMetrics);
     computePass.setBindGroup(0, this.bindGroups.shellMetrics);
-    computePass.dispatchWorkgroups(Math.ceil(Math.max(1, scene.points.length) / 64));
+    computePass.dispatchWorkgroups(Math.ceil(Math.max(1, scene.pointCount) / 64));
     computePass.end();
 
     const volumePass = commandEncoder.beginRenderPass({
@@ -212,7 +197,7 @@ export class HmrRenderer {
     });
     shellPass.setPipeline(this.pipelines.shell);
     shellPass.setBindGroup(0, this.bindGroups.shell);
-    shellPass.draw(QUAD_VERTEX_COUNT, scene.points.length, 0, 0);
+    shellPass.draw(QUAD_VERTEX_COUNT, scene.pointCount, 0, 0);
     shellPass.end();
 
     const compositePass = commandEncoder.beginRenderPass({
@@ -435,7 +420,7 @@ export class HmrRenderer {
     frame.set(
       [
         scene.clusters.length,
-        scene.points.length,
+        scene.pointCount,
         scene.frameState.quality.raymarchSteps,
         scene.frameState.quality.pointSizeScale
       ],
@@ -465,36 +450,17 @@ export class HmrRenderer {
     this.gpu.queue.writeBuffer(this.buffers.clusters, 0, data);
   }
 
-  private writePointBuffer(points: PhotonPoint[]): void {
+  private writePointBuffer(packedPoints: ArrayBuffer, pointCount: number): void {
     if (!this.gpu || !this.buffers) {
       return;
     }
-    const data = new Float32Array(this.pointCapacity * FLOATS_PER_POINT);
-    points.slice(0, this.pointCapacity).forEach((point, index) => {
-      const base = index * FLOATS_PER_POINT;
-      data.set(
-        [
-          point.position[0],
-          point.position[1],
-          point.position[2],
-          point.sdfRadius,
-          point.normal[0],
-          point.normal[1],
-          point.normal[2],
-          pointStateIndex(point.state),
-          point.velocity[0],
-          point.velocity[1],
-          point.velocity[2],
-          point.density,
-          point.phase,
-          point.brightness,
-          point.coherence,
-          point.age
-        ],
-        base
-      );
-    });
-    this.gpu.queue.writeBuffer(this.buffers.points, 0, data);
+    this.gpu.queue.writeBuffer(
+      this.buffers.points,
+      0,
+      packedPoints,
+      0,
+      Math.min(pointCount, this.pointCapacity) * FLOATS_PER_POINT * Float32Array.BYTES_PER_ELEMENT
+    );
   }
 
   private recreatePointBuffers(): void {

@@ -8,6 +8,8 @@ interface TrackerStats {
   coverage: number;
 }
 
+type SpatialHash = Map<string, PhotonPoint[]>;
+
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
 function sphericalDirection(index: number, total: number): Vec3 {
@@ -39,17 +41,67 @@ function projectCandidate(
   return { position: currentPosition, sampleRho: sample.rho };
 }
 
-function nearestDistance(candidate: Vec3, points: PhotonPoint[]): number {
-  let best = Number.POSITIVE_INFINITY;
+function hashCoord(position: Vec3, cellSize: number): Vec3 {
+  return [
+    Math.floor(position[0] / cellSize),
+    Math.floor(position[1] / cellSize),
+    Math.floor(position[2] / cellSize)
+  ];
+}
+
+function hashKey(coord: Vec3): string {
+  return `${coord[0]}:${coord[1]}:${coord[2]}`;
+}
+
+function buildSpatialHash(points: PhotonPoint[], cellSize: number): SpatialHash {
+  const hash: SpatialHash = new Map();
   for (const point of points) {
+    insertIntoSpatialHash(hash, point, cellSize);
+  }
+  return hash;
+}
+
+function insertIntoSpatialHash(hash: SpatialHash, point: PhotonPoint, cellSize: number): void {
+  const key = hashKey(hashCoord(point.position, cellSize));
+  const bucket = hash.get(key);
+  if (bucket) {
+    bucket.push(point);
+    return;
+  }
+  hash.set(key, [point]);
+}
+
+function nearbyPoints(hash: SpatialHash, position: Vec3, cellSize: number): PhotonPoint[] {
+  const coord = hashCoord(position, cellSize);
+  const neighbors: PhotonPoint[] = [];
+  for (let x = -1; x <= 1; x += 1) {
+    for (let y = -1; y <= 1; y += 1) {
+      for (let z = -1; z <= 1; z += 1) {
+        const bucket = hash.get(hashKey([coord[0] + x, coord[1] + y, coord[2] + z]));
+        if (!bucket) {
+          continue;
+        }
+        neighbors.push(...bucket);
+      }
+    }
+  }
+  return neighbors;
+}
+
+function nearestDistance(candidate: Vec3, hash: SpatialHash, cellSize: number, ignoreId?: number): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (const point of nearbyPoints(hash, candidate, cellSize)) {
+    if (point.id === ignoreId) {
+      continue;
+    }
     best = Math.min(best, vec3.distance(candidate, point.position));
   }
   return best;
 }
 
-function tangentialRepulsion(current: PhotonPoint, points: PhotonPoint[], strength: number): Vec3 {
+function tangentialRepulsion(current: PhotonPoint, hash: SpatialHash, cellSize: number, strength: number): Vec3 {
   let force: Vec3 = [0, 0, 0];
-  for (const other of points) {
+  for (const other of nearbyPoints(hash, current.position, cellSize)) {
     if (other.id === current.id) {
       continue;
     }
@@ -87,6 +139,8 @@ export class SurfaceTracker {
   seed(clusters: FieldClusterSpec[], time: number): void {
     this.points = [];
     this.nextId = 1;
+    const cellSize = this.config.spawn.maxSpacing;
+    const hash: SpatialHash = new Map();
     const targetPoints = Math.max(240, Math.floor(this.config.pointBudget * this.config.quality.shellDensity));
     const perCluster = Math.max(64, Math.floor(targetPoints / Math.max(1, clusters.length)));
     for (const cluster of clusters) {
@@ -98,26 +152,30 @@ export class SurfaceTracker {
         if (Math.abs(projection.sampleRho - this.config.surfaceThreshold) > 0.25) {
           continue;
         }
-        if (nearestDistance(projection.position, this.points) < this.config.spawn.minSpacing * 0.66) {
+        if (nearestDistance(projection.position, hash, cellSize) < this.config.spawn.minSpacing * 0.66) {
           continue;
         }
-        this.points.push(this.createPoint(clusters, projection.position, cluster.id, time, "birthing"));
+        const point = this.createPoint(clusters, projection.position, cluster.id, time, "birthing");
+        this.points.push(point);
+        insertIntoSpatialHash(hash, point, cellSize);
         if (this.points.length >= targetPoints) {
           break;
         }
       }
     }
-    this.rebuildPointSdf();
+    this.rebuildPointSdf(hash, cellSize);
     this.stats.coverage = this.computeCoverage();
   }
 
   step(clusters: FieldClusterSpec[], time: number, dt: number): void {
+    const cellSize = this.config.spawn.maxSpacing;
+    const sourceHash = buildSpatialHash(this.points, cellSize);
     const updatedPoints: PhotonPoint[] = [];
     for (const point of this.points) {
       const initialSample = sampleField(clusters, point.position, time, this.config.surfaceThreshold);
       const normal = vec3.normalize(initialSample.gradRho);
       const tangentialVelocity = tangentFlow(initialSample.flow, normal);
-      const relax = tangentialRepulsion(point, this.points, this.config.spawn.maxSpacing);
+      const relax = tangentialRepulsion(point, sourceHash, cellSize, this.config.spawn.maxSpacing);
       const tangentialRelax = tangentFlow(relax, normal);
       const predicted = vec3.add(
         point.position,
@@ -166,13 +224,14 @@ export class SurfaceTracker {
     }
 
     this.points = updatedPoints;
-    this.spawn(clusters, time);
-    this.cull(clusters, time);
-    this.rebuildPointSdf();
+    const workingHash = buildSpatialHash(this.points, cellSize);
+    this.spawn(clusters, time, workingHash);
+    this.cull(cellSize);
+    this.rebuildPointSdf(buildSpatialHash(this.points, cellSize), cellSize);
     this.stats.coverage = this.computeCoverage();
   }
 
-  private spawn(clusters: FieldClusterSpec[], time: number): void {
+  private spawn(clusters: FieldClusterSpec[], time: number, hash: SpatialHash): void {
     const targetCount = Math.max(240, Math.floor(this.config.pointBudget * this.config.quality.shellDensity));
     if (this.points.length >= targetCount) {
       return;
@@ -191,7 +250,7 @@ export class SurfaceTracker {
       const jitter = 0.82 + this.random() * 0.72;
       const candidate = vec3.add(cluster.center, vec3.scale(direction, cluster.structural.formRank * jitter));
       const projection = projectCandidate(clusters, candidate, time, this.config);
-      const distance = nearestDistance(projection.position, this.points);
+      const distance = nearestDistance(projection.position, hash, this.config.spawn.maxSpacing);
       if (
         projection.sampleRho < this.config.surfaceThreshold * 0.55 ||
         distance < this.config.spawn.minSpacing ||
@@ -200,43 +259,51 @@ export class SurfaceTracker {
         births += 1;
         continue;
       }
-      this.points.push(this.createPoint(clusters, projection.position, cluster.id, time, "birthing"));
+      const point = this.createPoint(clusters, projection.position, cluster.id, time, "birthing");
+      this.points.push(point);
+      insertIntoSpatialHash(hash, point, this.config.spawn.maxSpacing);
       births += 1;
     }
   }
 
-  private cull(clusters: FieldClusterSpec[], time: number): void {
+  private cull(cellSize: number): void {
     if (this.points.length === 0) {
       return;
     }
 
     const kept: PhotonPoint[] = [];
+    const keepHash: SpatialHash = new Map();
     let removed = 0;
     const sortedByDensity = [...this.points].sort((a, b) => b.density - a.density);
     for (const point of sortedByDensity) {
       if (removed >= this.config.spawn.maxCullPerStep && kept.length > 0) {
         kept.push(point);
+        insertIntoSpatialHash(keepHash, point, cellSize);
         continue;
       }
-      const sample = sampleField(clusters, point.position, time, this.config.surfaceThreshold);
-      const nearest = nearestDistance(point.position, kept);
+      const nearest = nearestDistance(point.position, keepHash, cellSize, point.id);
       const tooClose = nearest < this.config.spawn.minSpacing * 0.72;
-      const tooFar = Math.abs(sample.rho - this.config.surfaceThreshold) > 0.28;
+      const tooFar = Math.abs(point.density - this.config.surfaceThreshold) > 0.28;
       const agedOut = point.age > point.lifetime;
-      if (tooClose || tooFar || agedOut) {
+      const unstable = point.state === "nodal" && point.coherence < 0.12;
+      if (tooClose || tooFar || agedOut || unstable) {
         removed += 1;
         continue;
       }
-      kept.push({ ...point, density: sample.rho, coherence: sample.coherence });
+      kept.push(point);
+      insertIntoSpatialHash(keepHash, point, cellSize);
     }
     this.points = kept.slice(0, this.config.pointBudget);
   }
 
-  private rebuildPointSdf(): void {
+  private rebuildPointSdf(hash: SpatialHash, cellSize: number): void {
     this.points = this.points.map((point) => {
       const spacing = Math.max(
         this.config.spawn.minSpacing,
-        Math.min(this.config.spawn.maxSpacing, nearestDistance(point.position, this.points.filter((entry) => entry.id !== point.id)))
+        Math.min(
+          this.config.spawn.maxSpacing,
+          nearestDistance(point.position, hash, cellSize, point.id)
+        )
       );
       return {
         ...point,
