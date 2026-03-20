@@ -46,8 +46,8 @@ fn csMain(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let state = point.normal_state.w;
   let state_gain = select(1.0, 1.2, state == 1.0);
   let nodal_drop = select(1.0, 0.42, state == 3.0);
-  let size = radius * frame.counts.w * (0.85 + brightness * 0.35) * nodal_drop;
-  let halo = size * (1.2 + coherence * 1.6);
+  let size = radius * frame.counts.w * (0.62 + brightness * 0.16) * nodal_drop;
+  let halo = size * (0.42 + coherence * 0.58);
   let density_lift = density * (0.55 + coherence * 0.5) + abs(sin(phase)) * 0.08;
   metrics[index].size_halo_density_state = vec4<f32>(size * state_gain, halo, density_lift, state);
 }

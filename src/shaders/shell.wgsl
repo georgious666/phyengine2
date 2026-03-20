@@ -104,9 +104,9 @@ fn vsMain(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
 fn fsMain(input: VsOut) -> @location(0) vec4<f32> {
   let radial = length(input.local_uv);
   let core = smoothstep(1.0, 0.0, radial);
-  let halo = smoothstep(1.8, 0.15, radial * (1.0 + input.halo * 0.35));
+  let halo = smoothstep(1.18, 0.34, radial * (1.0 + input.halo * 0.12));
   let state_glow = 0.3 + input.coherence * 0.9;
-  let alpha = (core * 0.82 + halo * 0.28) * frame.presentation.z;
+  let alpha = (core * 0.9 + halo * 0.1) * frame.presentation.z;
   let phase_color = palette(input.phase * 0.159 + 0.5);
   let color = phase_color * (input.brightness * 0.55 + input.density_lift * 0.85) * state_glow * frame.composite.y;
   return vec4<f32>(color, alpha);

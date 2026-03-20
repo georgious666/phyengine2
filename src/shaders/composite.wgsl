@@ -38,8 +38,9 @@ fn vsMain(@builtin(vertex_index) vertex_index: u32) -> VsOut {
 fn fsMain(input: VsOut) -> @location(0) vec4<f32> {
   let volume = textureSample(volume_texture, scene_sampler, input.uv).rgb;
   let shell = textureSample(shell_texture, scene_sampler, input.uv).rgb;
-  let bloom = pow(shell, vec3<f32>(1.25, 1.25, 1.25)) * frame.composite.w * 0.45;
-  let combined = volume * frame.composite.z + shell * frame.composite.y + bloom;
+  let shell_presence = smoothstep(0.015, 0.14, max(shell.r, max(shell.g, shell.b)));
+  let bloom = pow(shell, vec3<f32>(1.55, 1.55, 1.55)) * frame.composite.w * 0.14;
+  let combined = volume * frame.composite.z * shell_presence + shell * frame.composite.y + bloom;
   let graded = pow(combined, vec3<f32>(0.92, 0.92, 0.92));
   return vec4<f32>(graded, 1.0);
 }

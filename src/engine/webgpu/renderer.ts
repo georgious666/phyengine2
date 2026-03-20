@@ -188,7 +188,7 @@ export class HmrRenderer {
       colorAttachments: [
         {
           view: this.offscreen.volume.createView(),
-          clearValue: { r: 0.02, g: 0.03, b: 0.05, a: 1 },
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
           loadOp: "clear",
           storeOp: "store"
         }
