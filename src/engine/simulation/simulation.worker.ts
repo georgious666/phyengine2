@@ -9,16 +9,16 @@ import type {
 let simulation: SimulationCore | null = null;
 
 function postFrame(snapshot: ReturnType<SimulationCore["getSnapshot"]>): void {
-  const packedBytes = new Uint8Array(snapshot.packedPoints.buffer.slice(0));
+  const packedPoints = snapshot.packedPoints.buffer as ArrayBuffer;
   const message: SimulationWorkerResponse = {
     type: "frame",
     clusters: snapshot.clusters,
-    packedPoints: packedBytes,
+    packedPoints,
     pointCount: snapshot.pointCount,
     frameState: snapshot.frameState
   };
 
-  self.postMessage(message, [packedBytes.buffer]);
+  self.postMessage(message, [packedPoints]);
 }
 
 self.onmessage = (event: MessageEvent<SimulationWorkerRequest>) => {

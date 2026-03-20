@@ -31,7 +31,7 @@ export type SimulationWorkerResponse =
   | {
       type: "frame";
       clusters: FieldClusterSpec[];
-      packedPoints: Uint8Array;
+      packedPoints: ArrayBuffer;
       pointCount: number;
       frameState: EngineFrameState;
     }

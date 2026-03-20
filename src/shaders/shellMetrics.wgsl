@@ -7,6 +7,7 @@ struct FrameUniforms {
   composite: vec4<f32>,
   counts: vec4<f32>,
   presentation: vec4<f32>,
+  motion: vec4<f32>,
 }
 
 struct PointRecord {
@@ -32,6 +33,11 @@ fn csMain(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   let point = points[index];
+  let point_id = point.phase_brightness.w;
+  if (point_id <= 0.0) {
+    metrics[index].size_halo_density_state = vec4<f32>(0.0);
+    return;
+  }
   let radius = point.position_radius.w;
   let density = point.velocity_density.w;
   let phase = point.phase_brightness.x;

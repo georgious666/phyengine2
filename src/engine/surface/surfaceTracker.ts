@@ -177,15 +177,13 @@ export class SurfaceTracker {
       const tangentialVelocity = tangentFlow(initialSample.flow, normal);
       const relax = tangentialRepulsion(point, sourceHash, cellSize, this.config.spawn.maxSpacing);
       const tangentialRelax = tangentFlow(relax, normal);
+      const advectVelocity = vec3.add(
+        vec3.scale(vec3.clampLength(tangentialVelocity, this.config.lodFlowLimit), this.config.velocityScale),
+        vec3.scale(tangentialRelax, this.config.shellRelaxation)
+      );
       const predicted = vec3.add(
         point.position,
-        vec3.scale(
-          vec3.add(
-            vec3.scale(vec3.clampLength(tangentialVelocity, this.config.lodFlowLimit), this.config.velocityScale),
-            vec3.scale(tangentialRelax, this.config.shellRelaxation)
-          ),
-          dt
-        )
+        vec3.scale(advectVelocity, dt)
       );
 
       let projected = predicted;
@@ -207,7 +205,7 @@ export class SurfaceTracker {
       updatedPoints.push({
         ...point,
         position: projected,
-        velocity: tangentialVelocity,
+        velocity: advectVelocity,
         normal: projectedNormal,
         density: projectedSample.rho,
         phase: projectedSample.phase,

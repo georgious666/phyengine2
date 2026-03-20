@@ -7,21 +7,23 @@ import type {
   ScenePostSettings,
   Vec3
 } from "../types";
-import { FLOATS_PER_POINT } from "../renderPacking";
-import { createWebGpuContext, type WebGpuContextResources } from "./context";
+import type { WebGpuContextResources } from "./context";
+import type { GpuTrackerRenderBuffers } from "./trackerTypes";
 import { orbitCamera } from "../math/mat4";
 import { vec3 } from "../math/vec3";
 
 const MAX_CLUSTERS = 8;
 const FLOATS_PER_CLUSTER = 16;
 const FLOATS_PER_METRIC = 4;
-const FRAME_UNIFORM_FLOATS = 32;
+const FRAME_UNIFORM_FLOATS = 36;
 const QUAD_VERTEX_COUNT = 6;
+const VOLUME_RESOLUTION_SCALE = 0.67;
 
 interface RendererScene {
   clusters: FieldClusterSpec[];
-  packedPoints: ArrayBuffer;
   pointCount: number;
+  simulationAge: number;
+  snapshotBlendAlpha: number;
   camera: SceneCamera;
   post: ScenePostSettings;
   frameState: EngineFrameState;
@@ -37,7 +39,6 @@ interface GpuPipelines {
 interface GpuBuffers {
   frame: GPUBuffer;
   clusters: GPUBuffer;
-  points: GPUBuffer;
   pointMetrics: GPUBuffer;
 }
 
@@ -94,6 +95,7 @@ function cameraBasis(camera: SceneCamera): { eye: Vec3; right: Vec3; up: Vec3; f
 
 export class HmrRenderer {
   private gpu?: WebGpuContextResources;
+  private pointBuffers?: GpuTrackerRenderBuffers;
   private pipelines?: GpuPipelines;
   private buffers?: GpuBuffers;
   private bindGroups?: {
@@ -106,24 +108,24 @@ export class HmrRenderer {
   private offscreen?: OffscreenTargets;
   private presentationSize = { width: 1, height: 1 };
   private pointCapacity: number;
+  private simulationFrame = -1;
+  private shellMetricsDirty = true;
 
   constructor(private readonly canvas: HTMLCanvasElement, private config: EngineConfig) {
-    this.pointCapacity = config.pointBudget;
+    this.pointCapacity = 0;
   }
 
-  async init(): Promise<void> {
-    this.gpu = await createWebGpuContext(this.canvas);
+  async init(gpu: WebGpuContextResources, pointBuffers: GpuTrackerRenderBuffers): Promise<void> {
+    this.gpu = gpu;
+    this.pointBuffers = pointBuffers;
+    this.pointCapacity = pointBuffers.pointCapacity;
     this.createResources();
     this.resize(this.canvas.clientWidth || 1, this.canvas.clientHeight || 1);
   }
 
   updateConfig(config: EngineConfig): void {
-    const pointBudgetChanged = config.pointBudget !== this.pointCapacity;
     this.config = config;
-    if (pointBudgetChanged) {
-      this.pointCapacity = config.pointBudget;
-      this.recreatePointBuffers();
-    }
+    this.shellMetricsDirty = true;
   }
 
   resize(width: number, height: number): void {
@@ -141,32 +143,45 @@ export class HmrRenderer {
     this.offscreen.volume.destroy();
     this.offscreen.shell.destroy();
     this.offscreen = {
-      volume: createOffscreenTexture(this.gpu.device, [scaledWidth, scaledHeight], "volume-target"),
+      volume: createOffscreenTexture(
+        this.gpu.device,
+        [
+          Math.max(1, Math.floor(scaledWidth * VOLUME_RESOLUTION_SCALE)),
+          Math.max(1, Math.floor(scaledHeight * VOLUME_RESOLUTION_SCALE))
+        ],
+        "volume-target"
+      ),
       shell: createOffscreenTexture(this.gpu.device, [scaledWidth, scaledHeight], "shell-target")
     };
     this.createBindGroups();
   }
 
   render(scene: RendererScene): void {
-    if (!this.gpu || !this.pipelines || !this.buffers || !this.bindGroups || !this.offscreen) {
+    if (!this.gpu || !this.pointBuffers || !this.pipelines || !this.buffers || !this.bindGroups || !this.offscreen) {
       return;
     }
 
     this.writeFrameUniforms(scene);
     this.writeClusterBuffer(scene.clusters);
-    this.writePointBuffer(scene.packedPoints, scene.pointCount);
+    if (scene.frameState.frame !== this.simulationFrame) {
+      this.simulationFrame = scene.frameState.frame;
+      this.shellMetricsDirty = true;
+    }
 
     const commandEncoder = this.gpu.device.createCommandEncoder({
       label: "hmr-command-encoder"
     });
 
-    const computePass = commandEncoder.beginComputePass({
-      label: "shell-metrics-pass"
-    });
-    computePass.setPipeline(this.pipelines.shellMetrics);
-    computePass.setBindGroup(0, this.bindGroups.shellMetrics);
-    computePass.dispatchWorkgroups(Math.ceil(Math.max(1, scene.pointCount) / 64));
-    computePass.end();
+    if (this.shellMetricsDirty) {
+      const computePass = commandEncoder.beginComputePass({
+        label: "shell-metrics-pass"
+      });
+      computePass.setPipeline(this.pipelines.shellMetrics);
+      computePass.setBindGroup(0, this.bindGroups.shellMetrics);
+      computePass.dispatchWorkgroups(Math.ceil(Math.max(1, this.pointCapacity) / 64));
+      computePass.end();
+      this.shellMetricsDirty = false;
+    }
 
     const volumePass = commandEncoder.beginRenderPass({
       label: "volume-pass",
@@ -197,7 +212,7 @@ export class HmrRenderer {
     });
     shellPass.setPipeline(this.pipelines.shell);
     shellPass.setBindGroup(0, this.bindGroups.shell);
-    shellPass.draw(QUAD_VERTEX_COUNT, scene.pointCount, 0, 0);
+    shellPass.draw(QUAD_VERTEX_COUNT, this.pointCapacity, 0, 0);
     shellPass.end();
 
     const compositePass = commandEncoder.beginRenderPass({
@@ -224,7 +239,6 @@ export class HmrRenderer {
     this.offscreen?.shell.destroy();
     this.buffers?.frame.destroy();
     this.buffers?.clusters.destroy();
-    this.buffers?.points.destroy();
     this.buffers?.pointMetrics.destroy();
   }
 
@@ -245,12 +259,6 @@ export class HmrRenderer {
         device,
         "cluster-storage-buffer",
         MAX_CLUSTERS * FLOATS_PER_CLUSTER * Float32Array.BYTES_PER_ELEMENT,
-        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-      ),
-      points: createBuffer(
-        device,
-        "point-storage-buffer",
-        this.pointCapacity * FLOATS_PER_POINT * Float32Array.BYTES_PER_ELEMENT,
         GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
       ),
       pointMetrics: createBuffer(
@@ -348,7 +356,7 @@ export class HmrRenderer {
   }
 
   private createBindGroups(): void {
-    if (!this.gpu || !this.pipelines || !this.buffers || !this.offscreen || !this.sampler) {
+    if (!this.gpu || !this.pointBuffers || !this.pipelines || !this.buffers || !this.offscreen || !this.sampler) {
       return;
     }
     const { device } = this.gpu;
@@ -365,7 +373,7 @@ export class HmrRenderer {
         layout: this.pipelines.shellMetrics.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: this.buffers.frame } },
-          { binding: 1, resource: { buffer: this.buffers.points } },
+          { binding: 1, resource: { buffer: this.pointBuffers.currentPoints } },
           { binding: 2, resource: { buffer: this.buffers.pointMetrics } }
         ]
       }),
@@ -373,8 +381,9 @@ export class HmrRenderer {
         layout: this.pipelines.shell.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: this.buffers.frame } },
-          { binding: 1, resource: { buffer: this.buffers.points } },
-          { binding: 2, resource: { buffer: this.buffers.pointMetrics } }
+          { binding: 1, resource: { buffer: this.pointBuffers.currentPoints } },
+          { binding: 2, resource: { buffer: this.pointBuffers.previousPoints } },
+          { binding: 3, resource: { buffer: this.buffers.pointMetrics } }
         ]
       }),
       composite: device.createBindGroup({
@@ -420,7 +429,7 @@ export class HmrRenderer {
     frame.set(
       [
         scene.clusters.length,
-        scene.pointCount,
+        this.pointCapacity,
         scene.frameState.quality.raymarchSteps,
         scene.frameState.quality.pointSizeScale
       ],
@@ -435,6 +444,7 @@ export class HmrRenderer {
       ],
       28
     );
+    frame.set([scene.simulationAge, 1, scene.snapshotBlendAlpha, 0], 32);
 
     this.gpu.queue.writeBuffer(this.buffers.frame, 0, frame);
   }
@@ -448,39 +458,5 @@ export class HmrRenderer {
       data.set(packCluster(cluster), index * FLOATS_PER_CLUSTER);
     });
     this.gpu.queue.writeBuffer(this.buffers.clusters, 0, data);
-  }
-
-  private writePointBuffer(packedPoints: ArrayBuffer, pointCount: number): void {
-    if (!this.gpu || !this.buffers) {
-      return;
-    }
-    this.gpu.queue.writeBuffer(
-      this.buffers.points,
-      0,
-      packedPoints,
-      0,
-      Math.min(pointCount, this.pointCapacity) * FLOATS_PER_POINT * Float32Array.BYTES_PER_ELEMENT
-    );
-  }
-
-  private recreatePointBuffers(): void {
-    if (!this.gpu || !this.buffers) {
-      return;
-    }
-    this.buffers.points.destroy();
-    this.buffers.pointMetrics.destroy();
-    this.buffers.points = createBuffer(
-      this.gpu.device,
-      "point-storage-buffer",
-      this.pointCapacity * FLOATS_PER_POINT * Float32Array.BYTES_PER_ELEMENT,
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    );
-    this.buffers.pointMetrics = createBuffer(
-      this.gpu.device,
-      "point-metrics-storage-buffer",
-      this.pointCapacity * FLOATS_PER_METRIC * Float32Array.BYTES_PER_ELEMENT,
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    );
-    this.createBindGroups();
   }
 }

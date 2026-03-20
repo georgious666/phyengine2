@@ -7,6 +7,7 @@ struct FrameUniforms {
   composite: vec4<f32>,
   counts: vec4<f32>,
   presentation: vec4<f32>,
+  motion: vec4<f32>,
 }
 
 struct PointRecord {
@@ -32,7 +33,8 @@ struct VsOut {
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var<storage, read> points: array<PointRecord>;
-@group(0) @binding(2) var<storage, read> metrics: array<PointMetric>;
+@group(0) @binding(2) var<storage, read> previous_points: array<PointRecord>;
+@group(0) @binding(3) var<storage, read> metrics: array<PointMetric>;
 
 fn palette(phase: f32) -> vec3<f32> {
   let a = vec3<f32>(0.54, 0.48, 0.62);
@@ -57,10 +59,28 @@ fn quad_corner(vertex_index: u32) -> vec2<f32> {
 @vertex
 fn vsMain(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> VsOut {
   let point = points[instance_index];
+  let previous_point = previous_points[instance_index];
   let metric = metrics[instance_index].size_halo_density_state;
+  let point_id = point.phase_brightness.w;
+  let previous_point_id = previous_point.phase_brightness.w;
   let corner = quad_corner(vertex_index);
+
+  var output: VsOut;
+  if (point_id <= 0.0 || metric.x <= 0.0) {
+    output.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    output.local_uv = vec2<f32>(0.0);
+    output.phase = 0.0;
+    output.brightness = 0.0;
+    output.density_lift = 0.0;
+    output.halo = 0.0;
+    output.coherence = 0.0;
+    return output;
+  }
+
+  let blend_alpha = select(1.0, frame.motion.z, previous_point_id > 0.0 && previous_point_id == point_id);
+  let blended_center = mix(previous_point.position_radius.xyz, point.position_radius.xyz, blend_alpha);
   let world_position =
-    point.position_radius.xyz +
+    blended_center +
     frame.camera_right.xyz * corner.x * metric.x +
     frame.camera_up.xyz * corner.y * metric.x;
   let relative = world_position - frame.camera_pos.xyz;
@@ -70,7 +90,6 @@ fn vsMain(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
   let ndc_x = view_x / (view_z * frame.lens.y * frame.lens.x);
   let ndc_y = view_y / (view_z * frame.lens.x);
 
-  var output: VsOut;
   output.position = vec4<f32>(ndc_x, ndc_y, clamp(view_z / 32.0, 0.0, 1.0), 1.0);
   output.local_uv = corner;
   output.phase = point.phase_brightness.x;

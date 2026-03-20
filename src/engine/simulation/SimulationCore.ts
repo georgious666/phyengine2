@@ -1,7 +1,7 @@
 import { buildActiveBricks } from "../field/brickPool";
 import { applyExcitations, averageFieldMetrics, sampleField } from "../field/fieldMath";
 import { getPresetById, SCENE_PRESETS } from "../presets";
-import { packPhotonPoints } from "../renderPacking";
+import { packPhotonPointSlots } from "../renderPacking";
 import { SurfaceTracker } from "../surface/surfaceTracker";
 import type {
   EngineConfig,
@@ -30,6 +30,9 @@ export class SimulationCore {
   private frame = 0;
   private time = 0;
   private fpsSmoother = 60;
+  private readonly pointSlotById = new Map<number, number>();
+  private freePointSlots: number[] = [];
+  private nextPointSlot = 0;
 
   constructor(config?: Partial<EngineConfig>, preset?: ScenePreset) {
     this.config = mergeConfig(cloneDefaultConfig(), config);
@@ -61,8 +64,19 @@ export class SimulationCore {
 
   updateConfig(partial?: Partial<EngineConfig>): SimulationSnapshot {
     if (partial) {
+      const pointBudgetChanged =
+        partial.pointBudget !== undefined && partial.pointBudget !== this.config.pointBudget;
       this.config = mergeConfig(this.config, partial);
       this.tracker.configure(this.config);
+      if (pointBudgetChanged) {
+        this.resetPointSlots();
+        this.syncPointSlots(this.tracker.getPoints());
+      }
+      this.frameState = {
+        ...this.frameState,
+        pointCount: Math.min(this.tracker.getPoints().length, this.config.pointBudget),
+        quality: structuredClone(this.config.quality)
+      };
     }
     return this.getSnapshot();
   }
@@ -81,11 +95,17 @@ export class SimulationCore {
 
   getSnapshot(): SimulationSnapshot {
     const points = this.tracker.getPoints();
+    this.syncPointSlots(points);
+    const pointCount = Math.min(points.length, this.config.pointBudget);
     return {
       clusters: this.animatedClusters,
-      packedPoints: packPhotonPoints(points, this.config.pointBudget),
-      pointCount: Math.min(points.length, this.config.pointBudget),
-      frameState: this.frameState
+      packedPoints: packPhotonPointSlots(points, this.pointSlotById, this.config.pointBudget),
+      pointCount,
+      frameState: {
+        ...this.frameState,
+        pointCount,
+        quality: structuredClone(this.config.quality)
+      }
     };
   }
 
@@ -95,6 +115,8 @@ export class SimulationCore {
     this.accumulator = 0;
     this.animatedClusters = applyExcitations(this.preset.clusters, this.preset.excitations, this.time);
     this.tracker.seed(this.animatedClusters, this.time);
+    this.resetPointSlots();
+    this.syncPointSlots(this.tracker.getPoints());
     this.frameState = {
       ...this.frameState,
       time: 0,
@@ -107,6 +129,47 @@ export class SimulationCore {
       shellCoverage: this.tracker.getCoverage(),
       quality: structuredClone(this.config.quality)
     };
+  }
+
+  private resetPointSlots(): void {
+    this.pointSlotById.clear();
+    this.freePointSlots = [];
+    this.nextPointSlot = 0;
+  }
+
+  private syncPointSlots(points: Array<{ id: number }>): void {
+    const liveIds = new Set(points.map((point) => point.id));
+    for (const [pointId, slot] of this.pointSlotById) {
+      if (liveIds.has(pointId)) {
+        continue;
+      }
+      this.pointSlotById.delete(pointId);
+      this.freePointSlots.push(slot);
+    }
+
+    for (const point of points) {
+      if (this.pointSlotById.has(point.id)) {
+        continue;
+      }
+      const slot = this.acquirePointSlot();
+      if (slot === -1) {
+        break;
+      }
+      this.pointSlotById.set(point.id, slot);
+    }
+  }
+
+  private acquirePointSlot(): number {
+    const recycledSlot = this.freePointSlots.pop();
+    if (recycledSlot !== undefined) {
+      return recycledSlot;
+    }
+    if (this.nextPointSlot >= this.config.pointBudget) {
+      return -1;
+    }
+    const slot = this.nextPointSlot;
+    this.nextPointSlot += 1;
+    return slot;
   }
 
   private advanceFixedStep(dt: number): void {

@@ -7,6 +7,7 @@ struct FrameUniforms {
   composite: vec4<f32>,
   counts: vec4<f32>,
   presentation: vec4<f32>,
+  motion: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;

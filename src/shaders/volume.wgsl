@@ -7,6 +7,7 @@ struct FrameUniforms {
   composite: vec4<f32>,
   counts: vec4<f32>,
   presentation: vec4<f32>,
+  motion: vec4<f32>,
 }
 
 struct ClusterRecord {
