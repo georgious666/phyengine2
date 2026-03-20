@@ -14,9 +14,14 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   lodFlowLimit: 1.8,
   quality: {
     raymarchSteps: 54,
+    surfaceSteps: 72,
     shellOpacity: 1,
     shellDensity: 1,
-    pointSizeScale: 1
+    pointSizeScale: 1,
+    surfaceResolutionScale: 1,
+    markerDensity: 0.18,
+    vorticityGain: 1.3,
+    burstGain: 1.6
   },
   spawn: {
     minSpacing: 0.18,

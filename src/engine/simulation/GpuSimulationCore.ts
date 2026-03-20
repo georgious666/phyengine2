@@ -1,7 +1,7 @@
 import { buildActiveBricks } from "../field/brickPool";
 import { cloneDefaultConfig, mergeConfig } from "../config";
 import { DEFAULT_ENGINE_CONFIG } from "../defaults";
-import { applyExcitations } from "../field/fieldMath";
+import { applyExcitations, flowDiagnostics } from "../field/fieldMath";
 import { getPresetById, SCENE_PRESETS } from "../presets";
 import { SurfaceTracker } from "../surface/surfaceTracker";
 import type {
@@ -16,6 +16,7 @@ import { GpuSurfaceTracker } from "../webgpu/gpuSurfaceTracker";
 import type { GpuTrackerMetricPoint, GpuTrackerRenderBuffers } from "../webgpu/trackerTypes";
 
 const DEFAULT_QUALITY = cloneDefaultConfig().quality;
+const GPU_RUNTIME_FIXED_STEP = 1 / 30;
 
 export interface GpuSimulationSnapshot {
   clusters: FieldClusterSpec[];
@@ -64,9 +65,28 @@ function averageMetricSamples(points: GpuTrackerMetricPoint[], frame: number): {
   };
 }
 
+function diagnosticMetricSamples(
+  points: GpuTrackerMetricPoint[],
+  clusters: FieldClusterSpec[],
+  time: number,
+  surfaceThreshold: number,
+  frame: number
+): { peakVorticity: number; peakBurst: number } {
+  const selected = points.filter((_, index) => index % 4 === frame % 4).slice(0, 12);
+  let peakVorticity = 0;
+  let peakBurst = 0;
+  for (const point of selected) {
+    const diagnostics = flowDiagnostics(clusters, point.position, time, surfaceThreshold);
+    peakVorticity = Math.max(peakVorticity, Math.hypot(...diagnostics.vorticity));
+    peakBurst = Math.max(peakBurst, diagnostics.burst);
+  }
+  return { peakVorticity, peakBurst };
+}
+
 export class GpuSimulationCore {
   private readonly tracker: GpuSurfaceTracker;
   private config: EngineConfig;
+  private targetQuality: EngineConfig["quality"];
   private preset: ScenePreset = getPresetById(SCENE_PRESETS[0].id);
   private animatedClusters: FieldClusterSpec[] = this.preset.clusters;
   private frameState: EngineFrameState;
@@ -77,6 +97,7 @@ export class GpuSimulationCore {
 
   constructor(gpu: WebGpuContextResources, config?: Partial<EngineConfig>, preset?: ScenePreset) {
     this.config = mergeConfig(cloneDefaultConfig(), config);
+    this.targetQuality = structuredClone(this.config.quality);
     if (preset) {
       this.preset = structuredClone(preset);
     }
@@ -91,6 +112,8 @@ export class GpuSimulationCore {
       averageDensity: 0,
       averageCoherence: 0,
       maxFlow: 0,
+      peakVorticity: 0,
+      peakBurst: 0,
       shellCoverage: 0,
       quality: structuredClone(this.config.quality)
     };
@@ -107,6 +130,7 @@ export class GpuSimulationCore {
       return;
     }
     this.config = mergeConfig(this.config, partial);
+    this.targetQuality = structuredClone(this.config.quality);
     this.tracker.configure(this.config);
     this.frameState = {
       ...this.frameState,
@@ -118,19 +142,20 @@ export class GpuSimulationCore {
   step(dt: number): void {
     this.fpsSmoother = this.fpsSmoother * 0.92 + (1 / Math.max(dt, 1e-4)) * 0.08;
     this.accumulator += dt;
+    const runtimeFixedStep = Math.max(this.config.fixedTimeStep, GPU_RUNTIME_FIXED_STEP);
     const maxSubSteps =
-      dt > this.config.fixedTimeStep * 1.5
+      dt > runtimeFixedStep * 1.5
         ? 1
         : this.config.maxSubSteps;
     let subSteps = 0;
-    while (this.accumulator >= this.config.fixedTimeStep && subSteps < maxSubSteps) {
-      this.advanceFixedStep(this.config.fixedTimeStep);
-      this.accumulator -= this.config.fixedTimeStep;
+    while (this.accumulator >= runtimeFixedStep && subSteps < maxSubSteps) {
+      this.advanceFixedStep(runtimeFixedStep);
+      this.accumulator -= runtimeFixedStep;
       subSteps += 1;
     }
-    if (this.accumulator > this.config.fixedTimeStep) {
+    if (this.accumulator > runtimeFixedStep) {
       // Avoid a GPU-driven catch-up spiral when a frame overruns badly.
-      this.accumulator = this.config.fixedTimeStep;
+      this.accumulator = runtimeFixedStep;
     }
     this.consumeTrackerSnapshot();
   }
@@ -169,6 +194,8 @@ export class GpuSimulationCore {
       averageDensity: 0,
       averageCoherence: 0,
       maxFlow: 0,
+      peakVorticity: 0,
+      peakBurst: 0,
       shellCoverage: seedTracker.getCoverage(),
       quality: structuredClone(this.config.quality)
     };
@@ -195,6 +222,13 @@ export class GpuSimulationCore {
     }
 
     const metrics = averageMetricSamples(snapshot.points, snapshot.frame);
+    const diagnostics = diagnosticMetricSamples(
+      snapshot.points,
+      this.animatedClusters,
+      this.time,
+      this.config.surfaceThreshold,
+      snapshot.frame
+    );
     const activeBricks = buildActiveBricks(
       snapshot.points.map((point) => toPhotonMetric(point, this.animatedClusters)),
       this.animatedClusters,
@@ -212,6 +246,8 @@ export class GpuSimulationCore {
       averageDensity: metrics.rho,
       averageCoherence: metrics.coherence,
       maxFlow: metrics.maxFlow,
+      peakVorticity: diagnostics.peakVorticity,
+      peakBurst: diagnostics.peakBurst,
       shellCoverage: snapshot.shellCoverage,
       quality: structuredClone(this.config.quality)
     };
@@ -224,20 +260,43 @@ export class GpuSimulationCore {
     );
 
     if (overload > 1.05) {
-      this.config.quality.raymarchSteps = Math.max(24, Math.floor(this.config.quality.raymarchSteps * 0.97));
-      this.config.quality.shellDensity = Math.max(0.58, this.config.quality.shellDensity * 0.992);
-      this.config.quality.pointSizeScale = Math.max(0.85, this.config.quality.pointSizeScale * 0.997);
+      if (this.config.quality.surfaceResolutionScale > 0.72) {
+        this.config.quality.surfaceResolutionScale = Math.max(
+          0.72,
+          this.config.quality.surfaceResolutionScale * 0.988
+        );
+      } else if (this.config.quality.surfaceSteps > 44) {
+        this.config.quality.surfaceSteps = Math.max(44, Math.floor(this.config.quality.surfaceSteps * 0.985));
+      } else if (this.config.quality.markerDensity > 0.04) {
+        this.config.quality.markerDensity = Math.max(0.04, this.config.quality.markerDensity * 0.985);
+      } else {
+        this.config.quality.raymarchSteps = Math.max(24, Math.floor(this.config.quality.raymarchSteps * 0.97));
+        this.config.quality.shellDensity = Math.max(0.58, this.config.quality.shellDensity * 0.992);
+        this.config.quality.pointSizeScale = Math.max(0.85, this.config.quality.pointSizeScale * 0.997);
+      }
     } else {
+      this.config.quality.surfaceResolutionScale = Math.min(
+        this.targetQuality.surfaceResolutionScale,
+        this.config.quality.surfaceResolutionScale + 0.006
+      );
+      this.config.quality.surfaceSteps = Math.min(
+        this.targetQuality.surfaceSteps,
+        this.config.quality.surfaceSteps + 1
+      );
+      this.config.quality.markerDensity = Math.min(
+        this.targetQuality.markerDensity,
+        this.config.quality.markerDensity + 0.01
+      );
       this.config.quality.raymarchSteps = Math.min(
-        DEFAULT_QUALITY.raymarchSteps,
+        this.targetQuality.raymarchSteps,
         this.config.quality.raymarchSteps + 1
       );
       this.config.quality.shellDensity = Math.min(
-        DEFAULT_QUALITY.shellDensity,
+        this.targetQuality.shellDensity,
         this.config.quality.shellDensity + 0.005
       );
       this.config.quality.pointSizeScale = Math.min(
-        DEFAULT_QUALITY.pointSizeScale,
+        this.targetQuality.pointSizeScale,
         this.config.quality.pointSizeScale + 0.003
       );
     }

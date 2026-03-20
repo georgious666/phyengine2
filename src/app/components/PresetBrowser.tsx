@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { ScenePreset } from "../../engine/types";
 
 interface PresetBrowserProps {
@@ -6,7 +7,11 @@ interface PresetBrowserProps {
   onSelect: (presetId: string) => void;
 }
 
-export function PresetBrowser({ presets, activePresetId, onSelect }: PresetBrowserProps): JSX.Element {
+export const PresetBrowser = memo(function PresetBrowser({
+  presets,
+  activePresetId,
+  onSelect
+}: PresetBrowserProps): JSX.Element {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -28,4 +33,4 @@ export function PresetBrowser({ presets, activePresetId, onSelect }: PresetBrows
       </div>
     </section>
   );
-}
+});

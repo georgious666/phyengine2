@@ -8,6 +8,7 @@ struct FrameUniforms {
   counts: vec4<f32>,
   presentation: vec4<f32>,
   motion: vec4<f32>,
+  surface: vec4<f32>,
 }
 
 struct PointRecord {
@@ -29,12 +30,15 @@ struct VsOut {
   @location(3) density_lift: f32,
   @location(4) halo: f32,
   @location(5) coherence: f32,
+  @location(6) view_depth: f32,
+  @location(7) marker_visibility: f32,
 }
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var<storage, read> points: array<PointRecord>;
 @group(0) @binding(2) var<storage, read> previous_points: array<PointRecord>;
 @group(0) @binding(3) var<storage, read> metrics: array<PointMetric>;
+@group(0) @binding(4) var surface_depth: texture_2d<f32>;
 
 fn palette(phase: f32) -> vec3<f32> {
   let a = vec3<f32>(0.54, 0.48, 0.62);
@@ -74,10 +78,12 @@ fn vsMain(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
     output.density_lift = 0.0;
     output.halo = 0.0;
     output.coherence = 0.0;
+    output.view_depth = 0.0;
+    output.marker_visibility = 0.0;
     return output;
   }
 
-  let blend_alpha = select(1.0, frame.motion.z, previous_point_id > 0.0 && previous_point_id == point_id);
+  let blend_alpha = select(1.0, frame.motion.y, previous_point_id > 0.0 && previous_point_id == point_id);
   let blended_center = mix(previous_point.position_radius.xyz, point.position_radius.xyz, blend_alpha);
   let world_position =
     blended_center +
@@ -97,16 +103,36 @@ fn vsMain(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
   output.density_lift = metric.z;
   output.halo = metric.y;
   output.coherence = point.phase_brightness.z;
+  output.view_depth = view_z;
+  output.marker_visibility = metric.w;
   return output;
 }
 
 @fragment
 fn fsMain(input: VsOut) -> @location(0) vec4<f32> {
+  if (input.marker_visibility <= 0.0) {
+    return vec4<f32>(0.0);
+  }
+
+  let render_mode = u32(frame.motion.z + 0.5);
+  if (render_mode != 0u) {
+    let depth_size = textureDimensions(surface_depth);
+    let scaled_uv = input.position.xy / frame.presentation.xy;
+    let depth_coord = vec2<i32>(
+      min(i32(depth_size.x) - 1, max(0, i32(scaled_uv.x * f32(depth_size.x)))),
+      min(i32(depth_size.y) - 1, max(0, i32(scaled_uv.y * f32(depth_size.y))))
+    );
+    let surface_view_depth = textureLoad(surface_depth, depth_coord, 0).x;
+    if (surface_view_depth > 0.0 && input.view_depth > surface_view_depth + max(0.12, input.halo * 0.55)) {
+      return vec4<f32>(0.0);
+    }
+  }
+
   let radial = length(input.local_uv);
   let core = smoothstep(1.0, 0.0, radial);
   let halo = smoothstep(1.18, 0.34, radial * (1.0 + input.halo * 0.12));
   let state_glow = 0.3 + input.coherence * 0.9;
-  let alpha = (core * 0.9 + halo * 0.1) * frame.presentation.z;
+  let alpha = (core * 0.9 + halo * 0.1) * frame.presentation.z * input.marker_visibility;
   let phase_color = palette(input.phase * 0.159 + 0.5);
   let color = phase_color * (input.brightness * 0.55 + input.density_lift * 0.85) * state_glow * frame.composite.y;
   return vec4<f32>(color, alpha);

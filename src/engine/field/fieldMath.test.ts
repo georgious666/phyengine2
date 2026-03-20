@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ENGINE_CONFIG } from "../defaults";
-import { sampleField, tangentFlow, projectToSurface } from "./fieldMath";
+import { flowDiagnostics, projectToSurface, sampleField, tangentFlow } from "./fieldMath";
 import { getPresetById } from "../presets";
 import { vec3 } from "../math/vec3";
 
@@ -39,5 +39,16 @@ describe("fieldMath", () => {
     expect(Math.abs(after.rho - DEFAULT_ENGINE_CONFIG.surfaceThreshold)).toBeLessThan(
       Math.abs(before.rho - DEFAULT_ENGINE_CONFIG.surfaceThreshold)
     );
+  });
+
+  it("computes finite flow diagnostics without unstable spikes on a stable shell", () => {
+    const preset = getPresetById("solo-orbital");
+    const initial = flowDiagnostics(preset.clusters, [1.02, 0.12, 0.08], 0.6, DEFAULT_ENGINE_CONFIG.surfaceThreshold);
+    const later = flowDiagnostics(preset.clusters, [1.02, 0.12, 0.08], 0.66, DEFAULT_ENGINE_CONFIG.surfaceThreshold);
+
+    expect(Number.isFinite(initial.divergence)).toBe(true);
+    expect(Number.isFinite(initial.burst)).toBe(true);
+    expect(Number.isFinite(Math.hypot(...initial.vorticity))).toBe(true);
+    expect(Math.abs(Math.hypot(...later.vorticity) - Math.hypot(...initial.vorticity))).toBeLessThan(3.5);
   });
 });

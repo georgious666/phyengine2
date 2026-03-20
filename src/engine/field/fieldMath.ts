@@ -1,6 +1,7 @@
 import type {
   Complex,
   FieldClusterSpec,
+  FlowDiagnostics,
   FieldSample,
   FieldModeSpec,
   PhotonPoint,
@@ -12,6 +13,11 @@ import { vec3 } from "../math/vec3";
 
 const FIELD_EPSILON = 1e-5;
 const GRADIENT_STEP = 0.035;
+
+function smoothstep(edge0: number, edge1: number, value: number): number {
+  const t = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
 
 function rotateEuler(v: Vec3, rotation: Vec3): Vec3 {
   const [rx, ry, rz] = rotation;
@@ -196,6 +202,12 @@ export function flowVelocity(psi: Complex, current: Vec3): Vec3 {
   return vec3.scale(current, 1 / (rho + FIELD_EPSILON));
 }
 
+export function flowAt(clusters: FieldClusterSpec[], position: Vec3, time: number): Vec3 {
+  const psi = samplePsi(clusters, position, time);
+  const current = probabilityCurrent(clusters, position, time);
+  return flowVelocity(psi, current);
+}
+
 export function coherenceMetric(clusters: FieldClusterSpec[], position: Vec3, time: number): number {
   const magnitudes = clusters.map((cluster) => Math.sqrt(densityFromPsi(sampleClusterPsi(cluster, position, time))));
   const sum = magnitudes.reduce((total, value) => total + value, 0);
@@ -231,6 +243,45 @@ export function sampleField(
     flow,
     coherence,
     shellDistance
+  };
+}
+
+export function flowDiagnostics(
+  clusters: FieldClusterSpec[],
+  position: Vec3,
+  time: number,
+  surfaceThreshold: number
+): FlowDiagnostics {
+  const sample = sampleField(clusters, position, time, surfaceThreshold);
+  const normal = vec3.normalize(sample.gradRho);
+  const dx = axisOffset(0, GRADIENT_STEP);
+  const dy = axisOffset(1, GRADIENT_STEP);
+  const dz = axisOffset(2, GRADIENT_STEP);
+  const flowXp = flowAt(clusters, vec3.add(position, dx), time);
+  const flowXm = flowAt(clusters, vec3.add(position, vec3.scale(dx, -1)), time);
+  const flowYp = flowAt(clusters, vec3.add(position, dy), time);
+  const flowYm = flowAt(clusters, vec3.add(position, vec3.scale(dy, -1)), time);
+  const flowZp = flowAt(clusters, vec3.add(position, dz), time);
+  const flowZm = flowAt(clusters, vec3.add(position, vec3.scale(dz, -1)), time);
+
+  const derivative = (plus: number, minus: number) => (plus - minus) / (2 * GRADIENT_STEP);
+  const divergence =
+    derivative(flowXp[0], flowXm[0]) +
+    derivative(flowYp[1], flowYm[1]) +
+    derivative(flowZp[2], flowZm[2]);
+  const vorticity: Vec3 = [
+    derivative(flowZp[1], flowZm[1]) - derivative(flowYp[2], flowYm[2]),
+    derivative(flowXp[2], flowXm[2]) - derivative(flowZp[0], flowZm[0]),
+    derivative(flowYp[0], flowYm[0]) - derivative(flowXp[1], flowXm[1])
+  ];
+
+  return {
+    vorticity,
+    divergence,
+    burst:
+      (Math.max(0, vec3.dot(sample.flow, normal)) + Math.max(0, divergence) * 0.5) *
+      smoothstep(0.08, 0.26, sample.coherence),
+    speed: vec3.length(sample.flow)
   };
 }
 

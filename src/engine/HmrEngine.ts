@@ -1,6 +1,6 @@
 import { cloneDefaultConfig, mergeConfig } from "./config";
 import { getPresetById, SCENE_PRESETS } from "./presets";
-import type { EngineConfig, EngineFrameState, ScenePreset } from "./types";
+import type { EngineConfig, EngineFrameState, RenderMode, ScenePreset } from "./types";
 import { GpuSimulationCore } from "./simulation/GpuSimulationCore";
 import { createWebGpuContext, type WebGpuContextResources } from "./webgpu/context";
 import { HmrRenderer } from "./webgpu/renderer";
@@ -16,6 +16,7 @@ export class HmrEngine {
   private previousFrameReceivedAt = 0;
   private lastRenderedSimulationFrame = -1;
   private initialized = false;
+  private renderMode: RenderMode = "hybrid";
 
   constructor(private readonly canvas: HTMLCanvasElement, config?: Partial<EngineConfig>) {
     this.config = mergeConfig(cloneDefaultConfig(), config);
@@ -29,6 +30,8 @@ export class HmrEngine {
       averageDensity: 0,
       averageCoherence: 0,
       maxFlow: 0,
+      peakVorticity: 0,
+      peakBurst: 0,
       shellCoverage: 0,
       quality: structuredClone(this.config.quality)
     };
@@ -60,6 +63,7 @@ export class HmrEngine {
     config?: Partial<EngineConfig>;
     post?: Partial<ScenePreset["post"]>;
     camera?: Partial<ScenePreset["camera"]>;
+    renderMode?: RenderMode;
   }): void {
     if (params.config) {
       this.config = mergeConfig(this.config, params.config);
@@ -78,6 +82,9 @@ export class HmrEngine {
         ...params.camera
       };
     }
+    if (params.renderMode) {
+      this.renderMode = params.renderMode;
+    }
   }
 
   step(dt: number): void {
@@ -86,6 +93,23 @@ export class HmrEngine {
     }
     this.simulation.step(dt);
     this.frameState = this.simulation.getSnapshot().frameState;
+    const quality = this.frameState.quality;
+    const qualityChanged =
+      quality.raymarchSteps !== this.config.quality.raymarchSteps ||
+      quality.surfaceSteps !== this.config.quality.surfaceSteps ||
+      quality.shellDensity !== this.config.quality.shellDensity ||
+      quality.pointSizeScale !== this.config.quality.pointSizeScale ||
+      quality.surfaceResolutionScale !== this.config.quality.surfaceResolutionScale ||
+      quality.markerDensity !== this.config.quality.markerDensity ||
+      quality.vorticityGain !== this.config.quality.vorticityGain ||
+      quality.burstGain !== this.config.quality.burstGain;
+    if (qualityChanged) {
+      this.config = {
+        ...this.config,
+        quality: structuredClone(quality)
+      };
+      this.renderer.updateConfig(this.config);
+    }
   }
 
   render(): void {
@@ -115,7 +139,8 @@ export class HmrEngine {
       })(),
       camera: this.preset.camera,
       post: this.preset.post,
-      frameState: snapshot.frameState
+      frameState: snapshot.frameState,
+      renderMode: this.renderMode
     });
   }
 

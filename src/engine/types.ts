@@ -2,6 +2,7 @@ export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
 export type Vec4 = [number, number, number, number];
 export type Complex = [number, number];
+export type RenderMode = "points" | "surface" | "hybrid";
 
 export type PhotonPointState =
   | "active"
@@ -96,6 +97,7 @@ export interface ScenePostSettings {
   bloomGain: number;
   shellComposite: number;
   volumeComposite: number;
+  surfaceComposite: number;
 }
 
 export interface SceneControl {
@@ -128,9 +130,14 @@ export interface ScenePreset {
 
 export interface EngineQuality {
   raymarchSteps: number;
+  surfaceSteps: number;
   shellOpacity: number;
   shellDensity: number;
   pointSizeScale: number;
+  surfaceResolutionScale: number;
+  markerDensity: number;
+  vorticityGain: number;
+  burstGain: number;
 }
 
 export interface EngineConfig {
@@ -164,6 +171,8 @@ export interface EngineFrameState {
   averageDensity: number;
   averageCoherence: number;
   maxFlow: number;
+  peakVorticity: number;
+  peakBurst: number;
   shellCoverage: number;
   quality: EngineQuality;
 }
@@ -177,4 +186,11 @@ export interface FieldSample {
   flow: Vec3;
   coherence: number;
   shellDistance: number;
+}
+
+export interface FlowDiagnostics {
+  vorticity: Vec3;
+  divergence: number;
+  burst: number;
+  speed: number;
 }

@@ -3,6 +3,7 @@ import { GPU_RUNTIME_CLUSTER_CAPACITY, GPU_RUNTIME_MODE_CAPACITY, GPU_RUNTIME_PO
 import type { EngineConfig, FieldClusterSpec, PhotonPoint, Vec3 } from "../types";
 import { advanceMulberry32State } from "../util/random";
 import type { WebGpuContextResources } from "./context";
+import { GPU_FIELD_CLUSTER_FLOATS, GPU_FIELD_MODE_FLOATS, packFieldClustersAndModes } from "./fieldBufferLayout";
 import type { GpuTrackerMetricsSnapshot, GpuTrackerRenderBuffers } from "./trackerTypes";
 import { shaderModules } from "./shaderModules";
 
@@ -427,13 +428,13 @@ export class GpuSurfaceTracker {
       clusters: createBuffer(
         this.device,
         "tracker-clusters",
-        GPU_RUNTIME_CLUSTER_CAPACITY * 20 * Float32Array.BYTES_PER_ELEMENT,
+        GPU_RUNTIME_CLUSTER_CAPACITY * GPU_FIELD_CLUSTER_FLOATS * Float32Array.BYTES_PER_ELEMENT,
         GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
       ),
       modes: createBuffer(
         this.device,
         "tracker-modes",
-        GPU_RUNTIME_MODE_CAPACITY * 12 * Float32Array.BYTES_PER_ELEMENT,
+        GPU_RUNTIME_MODE_CAPACITY * GPU_FIELD_MODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
         GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
       ),
       uniforms: createBuffer(
@@ -636,48 +637,7 @@ export class GpuSurfaceTracker {
   }
 
   private writeClusterAndModeBuffers(clusters: FieldClusterSpec[]): void {
-    const clusterData = new Float32Array(GPU_RUNTIME_CLUSTER_CAPACITY * 20);
-    const modeData = new Float32Array(GPU_RUNTIME_MODE_CAPACITY * 12);
-    let modeOffset = 0;
-
-    clusters.slice(0, GPU_RUNTIME_CLUSTER_CAPACITY).forEach((cluster, clusterIndex) => {
-      const base = clusterIndex * 20;
-      clusterData[base + 0] = cluster.center[0];
-      clusterData[base + 1] = cluster.center[1];
-      clusterData[base + 2] = cluster.center[2];
-      clusterData[base + 4] = cluster.orientation[0];
-      clusterData[base + 5] = cluster.orientation[1];
-      clusterData[base + 6] = cluster.orientation[2];
-      clusterData[base + 8] = cluster.structural.kernelDensity;
-      clusterData[base + 9] = cluster.structural.formRank;
-      clusterData[base + 10] = cluster.structural.formComplexity;
-      clusterData[base + 11] = cluster.structural.coherence;
-      clusterData[base + 12] = cluster.dynamic.energyInput;
-      clusterData[base + 13] = cluster.dynamic.excitationState;
-      clusterData[base + 14] = cluster.dynamic.transitionTension;
-      clusterData[base + 15] = cluster.dynamic.turbulence;
-      clusterData[base + 16] = modeOffset;
-      clusterData[base + 17] = cluster.modes.length;
-      clusterData[base + 18] = cluster.visual.phaseMapping;
-
-      cluster.modes.forEach((mode) => {
-        if (modeOffset >= GPU_RUNTIME_MODE_CAPACITY) {
-          return;
-        }
-        const modeBase = modeOffset * 12;
-        modeData[modeBase + 0] = mode.amplitude;
-        modeData[modeBase + 1] = mode.radialScale;
-        modeData[modeBase + 2] = mode.radialOffset;
-        modeData[modeBase + 3] = mode.angularSharpness;
-        modeData[modeBase + 4] = mode.phaseOffset;
-        modeData[modeBase + 5] = mode.phaseVelocity;
-        modeData[modeBase + 6] = mode.swirl;
-        modeData[modeBase + 8] = mode.direction[0];
-        modeData[modeBase + 9] = mode.direction[1];
-        modeData[modeBase + 10] = mode.direction[2];
-        modeOffset += 1;
-      });
-    });
+    const { clusterData, modeData } = packFieldClustersAndModes(clusters);
 
     this.queue.writeBuffer(this.buffers.clusters, 0, clusterData.buffer as ArrayBuffer, clusterData.byteOffset, clusterData.byteLength);
     this.queue.writeBuffer(this.buffers.modes, 0, modeData.buffer as ArrayBuffer, modeData.byteOffset, modeData.byteLength);

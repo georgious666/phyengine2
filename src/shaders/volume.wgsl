@@ -8,17 +8,36 @@ struct FrameUniforms {
   counts: vec4<f32>,
   presentation: vec4<f32>,
   motion: vec4<f32>,
+  surface: vec4<f32>,
 }
 
 struct ClusterRecord {
-  center_threshold: vec4<f32>,
-  orientation_phase: vec4<f32>,
+  center: vec4<f32>,
+  orientation: vec4<f32>,
   structural: vec4<f32>,
-  visual: vec4<f32>,
+  dynamic: vec4<f32>,
+  mode_range_phase: vec4<f32>,
+}
+
+struct ModeRecord {
+  values0: vec4<f32>,
+  values1: vec4<f32>,
+  direction: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var<storage, read> clusters: array<ClusterRecord>;
+@group(0) @binding(2) var<storage, read> modes: array<ModeRecord>;
+
+fn cluster_count() -> u32 {
+  return u32(frame.counts.x);
+}
+
+fn surface_threshold() -> f32 {
+  return frame.lens.w;
+}
+
+/*__FIELD_SHARED__*/
 
 struct VsOut {
   @builtin(position) position: vec4<f32>,
@@ -33,39 +52,34 @@ fn palette(phase: f32) -> vec3<f32> {
   return a + b * cos(6.28318 * (c * phase + d));
 }
 
-fn sample_cluster(index: i32, position: vec3<f32>, time: f32) -> vec2<f32> {
-  let cluster = clusters[index];
-  let center = cluster.center_threshold.xyz;
-  let threshold = cluster.center_threshold.w;
-  let orientation = normalize(cluster.orientation_phase.xyz + vec3<f32>(0.001, 0.0, 0.0));
-  let phase_bias = cluster.orientation_phase.w;
-  let kernel_density = cluster.structural.x;
-  let form_rank = cluster.structural.y;
-  let form_complexity = cluster.structural.z;
-  let coherence = cluster.structural.w;
-  let excitation = cluster.visual.x;
-  let surface_thickness = cluster.visual.z;
-  let spectral_spread = cluster.visual.w;
-  let offset = position - center;
-  let radius = length(offset);
-  let shell = exp(-pow(radius - form_rank, 2.0) / max(0.18, 2.0 * pow(0.22 + surface_thickness * 0.18, 2.0)));
-  let lobe = pow(max(0.05, 0.5 + 0.5 * dot(normalize(offset + vec3<f32>(0.0001, 0.0, 0.0)), orientation)), max(0.35, form_complexity));
-  let amplitude = kernel_density * coherence * shell * lobe * (1.0 + excitation * 0.4);
-  let phase = phase_bias + time * (0.55 + excitation * 0.35) + dot(offset, orientation) * spectral_spread * 1.25 + threshold * 0.5;
-  return vec2<f32>(cos(phase), sin(phase)) * amplitude;
+fn scene_bounds() -> vec4<f32> {
+  let cluster_total = max(1u, cluster_count());
+  var center = vec3<f32>(0.0);
+  for (var index = 0u; index < cluster_total; index = index + 1u) {
+    center = center + clusters[index].center.xyz;
+  }
+  center = center / f32(cluster_total);
+
+  var radius = 0.0;
+  for (var index = 0u; index < cluster_total; index = index + 1u) {
+    let cluster = clusters[index];
+    let extent = 0.72 + cluster.structural.y * 1.78 + cluster.dynamic.w * 0.18;
+    radius = max(radius, distance(center, cluster.center.xyz) + extent);
+  }
+
+  return vec4<f32>(center, max(radius, 1.9));
 }
 
-fn sample_field(position: vec3<f32>, time: f32) -> vec4<f32> {
-  var psi = vec2<f32>(0.0, 0.0);
-  var amplitude_sum = 0.0;
-  for (var i = 0; i < i32(frame.counts.x); i = i + 1) {
-    let contribution = sample_cluster(i, position, time);
-    amplitude_sum = amplitude_sum + length(contribution);
-    psi = psi + contribution;
+fn ray_sphere_interval(origin: vec3<f32>, direction: vec3<f32>, center: vec3<f32>, radius: f32) -> vec2<f32> {
+  let oc = origin - center;
+  let half_b = dot(oc, direction);
+  let c = dot(oc, oc) - radius * radius;
+  let discriminant = half_b * half_b - c;
+  if (discriminant <= 0.0) {
+    return vec2<f32>(1e9, -1e9);
   }
-  let density = dot(psi, psi);
-  let coherence = select(0.0, clamp(length(psi) / max(amplitude_sum, 0.0001), 0.0, 1.0), amplitude_sum > 0.0);
-  return vec4<f32>(psi, density, coherence);
+  let root = sqrt(discriminant);
+  return vec2<f32>(-half_b - root, -half_b + root);
 }
 
 @vertex
@@ -90,25 +104,33 @@ fn fsMain(input: VsOut) -> @location(0) vec4<f32> {
       centered_uv.x * frame.lens.y * frame.lens.x * frame.camera_right.xyz +
       centered_uv.y * frame.lens.x * frame.camera_up.xyz
   );
+  let bounds = scene_bounds();
+  let interval = ray_sphere_interval(frame.camera_pos.xyz, ray_dir, bounds.xyz, bounds.w);
+  if (interval.y <= 0.4 || interval.y <= interval.x) {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  }
 
   let max_steps = i32(frame.counts.z);
-  let step_size = 0.14;
-  var distance_along_ray = 0.4;
+  let step_size = max(0.08, (interval.y - max(0.35, interval.x)) / max(12.0, frame.counts.z));
+  let ray_end = interval.y;
+  var distance_along_ray = max(0.35, interval.x);
   var transmittance = 1.0;
-  var color = vec3<f32>(0.0, 0.0, 0.0);
+  var color = vec3<f32>(0.0);
 
-  for (var step = 0; step < max_steps; step = step + 1) {
+  for (var step = 0; step < max_steps && distance_along_ray <= ray_end; step = step + 1) {
     let position = frame.camera_pos.xyz + ray_dir * distance_along_ray;
     let field = sample_field(position, frame.lens.z);
-    let psi = field.xy;
-    let density = field.z;
-    let coherence = field.w;
-    let shell_band = exp(-abs(density - frame.lens.w) * 8.0);
-    let phase = atan2(psi.y, psi.x);
-    let phase_color = palette(phase * 0.159 + 0.5);
-    let scatter = density * 0.12 + shell_band * 0.18;
-    color = color + phase_color * scatter * transmittance * (0.3 + coherence * 0.8);
-    transmittance = transmittance * exp(-density * 0.16 - shell_band * 0.02);
+    let shell_band = exp(-abs(field.rho - surface_threshold()) * 8.0);
+    let phase_color = palette(field.phase * 0.159 + 0.5);
+    let flow_energy = clamp(length(field.flow) * 0.2, 0.0, 1.0);
+    let scatter = field.rho * 0.1 + shell_band * 0.22;
+    color =
+      color +
+      phase_color * scatter * transmittance * (0.26 + field.coherence * 0.84 + flow_energy * 0.24);
+    transmittance = transmittance * exp(-field.rho * 0.14 - shell_band * 0.035);
+    if (transmittance < 0.03) {
+      break;
+    }
     distance_along_ray = distance_along_ray + step_size;
   }
 

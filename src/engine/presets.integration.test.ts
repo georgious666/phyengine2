@@ -1,8 +1,43 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ENGINE_CONFIG } from "./defaults";
-import { sampleField } from "./field/fieldMath";
+import { applyExcitations, flowDiagnostics, sampleField } from "./field/fieldMath";
 import { getPresetById } from "./presets";
 import { SurfaceTracker } from "./surface/surfaceTracker";
+
+function peakBurstForPreset(presetId: string, untilTime: number): number {
+  const preset = getPresetById(presetId);
+  const tracker = new SurfaceTracker({
+    ...DEFAULT_ENGINE_CONFIG,
+    pointBudget: 280
+  });
+
+  tracker.seed(applyExcitations(preset.clusters, preset.excitations, 0), 0);
+  for (let step = 0; step < Math.floor(untilTime / DEFAULT_ENGINE_CONFIG.fixedTimeStep); step += 1) {
+    const time = step * DEFAULT_ENGINE_CONFIG.fixedTimeStep;
+    tracker.step(
+      applyExcitations(preset.clusters, preset.excitations, time),
+      time,
+      DEFAULT_ENGINE_CONFIG.fixedTimeStep
+    );
+  }
+
+  return tracker
+    .getPoints()
+    .slice(0, 24)
+    .reduce(
+      (maxBurst, point) =>
+        Math.max(
+          maxBurst,
+          flowDiagnostics(
+            applyExcitations(preset.clusters, preset.excitations, untilTime),
+            point.position,
+            untilTime,
+            DEFAULT_ENGINE_CONFIG.surfaceThreshold
+          ).burst
+        ),
+      0
+    );
+}
 
 describe("scene presets", () => {
   it("creates a denser midpoint bridge in the coherent preset than in the nodal gap preset", () => {
@@ -76,5 +111,12 @@ describe("scene presets", () => {
     expect(signature).toMatchInlineSnapshot(
       `"0.32:0.22:-0.25:0.61:0.46|-0.18:-0.26:1.12:-1.38:0.36|0.33:-0.87:0.53:-0.25:0.26|-0.38:0.87:-0.71:1.56:0.24|-0.46:0.29:0.61:2.50:0.24|-0.45:0.34:0.47:2.55:0.24"`
     );
+  });
+
+  it("amplifies excited-transition burst during the excitation window", () => {
+    const preBurst = peakBurstForPreset("excited-transition", 0.9);
+    const excitedBurst = peakBurstForPreset("excited-transition", 2.2);
+
+    expect(excitedBurst).toBeGreaterThan(preBurst * 1.15);
   });
 });

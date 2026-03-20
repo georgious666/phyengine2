@@ -157,7 +157,8 @@ export const SCENE_PRESETS: ScenePreset[] = [
       exposure: 1.1,
       bloomGain: 0.9,
       shellComposite: 1.1,
-      volumeComposite: 0.84
+      volumeComposite: 0.84,
+      surfaceComposite: 1.16
     },
     controls: [
       { key: "surfaceThreshold", label: "Shell Threshold", min: 0.12, max: 0.42, step: 0.01, initial: 0.24 },
@@ -211,7 +212,8 @@ export const SCENE_PRESETS: ScenePreset[] = [
       exposure: 1.18,
       bloomGain: 1.1,
       shellComposite: 1.18,
-      volumeComposite: 0.8
+      volumeComposite: 0.8,
+      surfaceComposite: 1.22
     },
     controls: [
       { key: "surfaceThreshold", label: "Shell Threshold", min: 0.14, max: 0.4, step: 0.01, initial: 0.24 },
@@ -270,7 +272,8 @@ export const SCENE_PRESETS: ScenePreset[] = [
       exposure: 1.05,
       bloomGain: 0.8,
       shellComposite: 1.08,
-      volumeComposite: 0.88
+      volumeComposite: 0.88,
+      surfaceComposite: 1.08
     },
     controls: [
       { key: "surfaceThreshold", label: "Shell Threshold", min: 0.14, max: 0.38, step: 0.01, initial: 0.24 },
@@ -329,7 +332,8 @@ export const SCENE_PRESETS: ScenePreset[] = [
       exposure: 1.12,
       bloomGain: 1.12,
       shellComposite: 1.14,
-      volumeComposite: 0.78
+      volumeComposite: 0.78,
+      surfaceComposite: 1.2
     },
     controls: [
       { key: "surfaceThreshold", label: "Shell Threshold", min: 0.14, max: 0.38, step: 0.01, initial: 0.23 },

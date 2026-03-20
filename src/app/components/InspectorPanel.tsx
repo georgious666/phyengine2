@@ -1,9 +1,11 @@
-import type { EngineFrameState, ScenePreset } from "../../engine/types";
+import type { EngineFrameState, RenderMode, ScenePreset } from "../../engine/types";
 
 interface InspectorPanelProps {
   preset: ScenePreset;
   controls: Record<string, number>;
   frameState: EngineFrameState | null;
+  renderMode: RenderMode;
+  onRenderModeChange: (renderMode: RenderMode) => void;
   onControlChange: (key: string, value: number) => void;
 }
 
@@ -15,6 +17,8 @@ export function InspectorPanel({
   preset,
   controls,
   frameState,
+  renderMode,
+  onRenderModeChange,
   onControlChange
 }: InspectorPanelProps): JSX.Element {
   return (
@@ -25,6 +29,19 @@ export function InspectorPanel({
       </div>
 
       <div className="control-stack">
+        <div className="mode-toggle" role="tablist" aria-label="Render mode">
+          {(["points", "surface", "hybrid"] as const).map((mode) => (
+            <button
+              type="button"
+              key={mode}
+              className={`mode-chip ${renderMode === mode ? "active" : ""}`}
+              onClick={() => onRenderModeChange(mode)}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+
         {preset.controls.map((control) => (
           <label className="control-row" key={control.key}>
             <div className="control-meta">
@@ -75,6 +92,66 @@ export function InspectorPanel({
             />
           </label>
         ) : null}
+
+        <label className="control-row" key="surfaceSteps">
+          <div className="control-meta">
+            <span>Surface Steps</span>
+            <strong>{Math.round(controls.surfaceSteps ?? 72)}</strong>
+          </div>
+          <input
+            type="range"
+            min={44}
+            max={96}
+            step={1}
+            value={controls.surfaceSteps ?? 72}
+            onChange={(event) => onControlChange("surfaceSteps", Number(event.target.value))}
+          />
+        </label>
+
+        <label className="control-row" key="markerDensity">
+          <div className="control-meta">
+            <span>Marker Density</span>
+            <strong>{formatNumber(controls.markerDensity ?? 0.18)}</strong>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={controls.markerDensity ?? 0.18}
+            onChange={(event) => onControlChange("markerDensity", Number(event.target.value))}
+          />
+        </label>
+
+        <label className="control-row" key="vorticityGain">
+          <div className="control-meta">
+            <span>Vortex Gain</span>
+            <strong>{formatNumber(controls.vorticityGain ?? 1.3)}</strong>
+          </div>
+          <input
+            type="range"
+            min={0.4}
+            max={2.4}
+            step={0.01}
+            value={controls.vorticityGain ?? 1.3}
+            onChange={(event) => onControlChange("vorticityGain", Number(event.target.value))}
+          />
+        </label>
+
+        <label className="control-row" key="burstGain">
+          <div className="control-meta">
+            <span>Burst Gain</span>
+            <strong>{formatNumber(controls.burstGain ?? 1.6)}</strong>
+          </div>
+          <input
+            type="range"
+            min={0.4}
+            max={2.6}
+            step={0.01}
+            value={controls.burstGain ?? 1.6}
+            onChange={(event) => onControlChange("burstGain", Number(event.target.value))}
+          />
+        </label>
       </div>
 
       <div className="metrics-card">
@@ -93,6 +170,14 @@ export function InspectorPanel({
         <div className="metric">
           <span>Max Flow</span>
           <strong>{frameState ? frameState.maxFlow.toFixed(3) : "..."}</strong>
+        </div>
+        <div className="metric">
+          <span>Peak Vorticity</span>
+          <strong>{frameState ? frameState.peakVorticity.toFixed(3) : "..."}</strong>
+        </div>
+        <div className="metric">
+          <span>Peak Burst</span>
+          <strong>{frameState ? frameState.peakBurst.toFixed(3) : "..."}</strong>
         </div>
       </div>
     </section>

@@ -8,6 +8,7 @@ struct FrameUniforms {
   counts: vec4<f32>,
   presentation: vec4<f32>,
   motion: vec4<f32>,
+  surface: vec4<f32>,
 }
 
 struct PointRecord {
@@ -24,6 +25,10 @@ struct PointMetric {
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var<storage, read> points: array<PointRecord>;
 @group(0) @binding(2) var<storage, read_write> metrics: array<PointMetric>;
+
+fn random_hash(seed: f32) -> f32 {
+  return fract(sin(seed * 12.9898) * 43758.5453);
+}
 
 @compute @workgroup_size(64)
 fn csMain(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -44,10 +49,23 @@ fn csMain(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let brightness = point.phase_brightness.y;
   let coherence = point.phase_brightness.z;
   let state = point.normal_state.w;
+  let speed = length(point.velocity_density.xyz);
+  let outward = max(0.0, dot(point.velocity_density.xyz, point.normal_state.xyz));
+  let burst = clamp(outward * 1.45 + speed * 0.42, 0.0, 1.8);
+  let render_mode = u32(frame.motion.z + 0.5);
   let state_gain = select(1.0, 1.2, state == 1.0);
   let nodal_drop = select(1.0, 0.42, state == 3.0);
-  let size = radius * frame.counts.w * (0.62 + brightness * 0.16) * nodal_drop;
+  var marker_visibility = 1.0;
+  if (render_mode == 1u) {
+    marker_visibility = 0.0;
+  } else if (render_mode == 2u) {
+    let keep_probability = clamp(frame.surface.y * (0.12 + burst * 0.64 + coherence * 0.18), 0.0, 1.0);
+    let noise = random_hash(point_id * 0.173 + phase * 0.91 + density * 0.37);
+    marker_visibility = select(0.0, clamp(0.35 + burst * 0.62, 0.0, 1.0), noise < keep_probability);
+  }
+  let hybrid_scale = select(1.0, 0.4 + burst * 0.55, render_mode == 2u);
+  let size = radius * frame.counts.w * (0.62 + brightness * 0.16) * nodal_drop * hybrid_scale * marker_visibility;
   let halo = size * (0.42 + coherence * 0.58);
   let density_lift = density * (0.55 + coherence * 0.5) + abs(sin(phase)) * 0.08;
-  metrics[index].size_halo_density_state = vec4<f32>(size * state_gain, halo, density_lift, state);
+  metrics[index].size_halo_density_state = vec4<f32>(size * state_gain, halo, density_lift, marker_visibility);
 }

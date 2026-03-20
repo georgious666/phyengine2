@@ -1,17 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, startTransition, useEffect, useRef, useState } from "react";
 import { DEFAULT_ENGINE_CONFIG } from "../../engine/defaults";
 import { HmrEngine } from "../../engine/HmrEngine";
-import type { EngineFrameState } from "../../engine/types";
+import type { EngineFrameState, RenderMode } from "../../engine/types";
 
 interface ViewportCanvasProps {
   presetId: string;
+  renderMode: RenderMode;
   controls: Record<string, number>;
   onFrameState: (state: EngineFrameState) => void;
   onStatus: (status: string) => void;
 }
 
-export function ViewportCanvas({
+const UI_FRAMESTATE_CADENCE_MS = 120;
+
+export const ViewportCanvas = memo(function ViewportCanvas({
   presetId,
+  renderMode,
   controls,
   onFrameState,
   onStatus
@@ -24,6 +28,7 @@ export function ViewportCanvas({
     x: 0,
     y: 0
   });
+  const lastFrameStatePushRef = useRef(0);
   const [ready, setReady] = useState(false);
   const [overlayMessage, setOverlayMessage] = useState("Preparing field and shell buffers...");
 
@@ -68,6 +73,7 @@ export function ViewportCanvas({
         setReady(true);
         setOverlayMessage("");
         onStatus("WebGPU ready. Drag to orbit, wheel to zoom.");
+        lastFrameStatePushRef.current = 0;
 
         const frame = (now: number) => {
           if (!engineRef.current) {
@@ -77,7 +83,16 @@ export function ViewportCanvas({
           lastTime = now;
           engineRef.current.step(dt);
           engineRef.current.render();
-          onFrameState(engineRef.current.getFrameState());
+          const frameState = engineRef.current.getFrameState();
+          if (
+            lastFrameStatePushRef.current === 0 ||
+            now - lastFrameStatePushRef.current >= UI_FRAMESTATE_CADENCE_MS
+          ) {
+            lastFrameStatePushRef.current = now;
+            startTransition(() => {
+              onFrameState(frameState);
+            });
+          }
           animationFrame = requestAnimationFrame(frame);
         };
         animationFrame = requestAnimationFrame(frame);
@@ -115,21 +130,27 @@ export function ViewportCanvas({
       return;
     }
     engineRef.current.updateParams({
+      renderMode,
       config: {
         surfaceThreshold: controls.surfaceThreshold ?? DEFAULT_ENGINE_CONFIG.surfaceThreshold,
         pointBudget: Math.round(controls.pointBudget ?? DEFAULT_ENGINE_CONFIG.pointBudget),
         quality: {
           raymarchSteps: Math.round(controls.raymarchSteps ?? DEFAULT_ENGINE_CONFIG.quality.raymarchSteps),
+          surfaceSteps: Math.round(controls.surfaceSteps ?? DEFAULT_ENGINE_CONFIG.quality.surfaceSteps),
           shellDensity: controls.shellDensity ?? DEFAULT_ENGINE_CONFIG.quality.shellDensity,
           pointSizeScale: controls.pointSizeScale ?? DEFAULT_ENGINE_CONFIG.quality.pointSizeScale,
-          shellOpacity: DEFAULT_ENGINE_CONFIG.quality.shellOpacity
+          shellOpacity: DEFAULT_ENGINE_CONFIG.quality.shellOpacity,
+          surfaceResolutionScale: DEFAULT_ENGINE_CONFIG.quality.surfaceResolutionScale,
+          markerDensity: controls.markerDensity ?? DEFAULT_ENGINE_CONFIG.quality.markerDensity,
+          vorticityGain: controls.vorticityGain ?? DEFAULT_ENGINE_CONFIG.quality.vorticityGain,
+          burstGain: controls.burstGain ?? DEFAULT_ENGINE_CONFIG.quality.burstGain
         }
       },
       post: {
         exposure: controls.exposure ?? 1.1
       }
     });
-  }, [controls]);
+  }, [controls, renderMode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -189,4 +210,4 @@ export function ViewportCanvas({
       {!ready ? <div className="viewport-overlay">{overlayMessage}</div> : null}
     </div>
   );
-}
+});

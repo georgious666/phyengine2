@@ -1,5 +1,5 @@
 import { buildActiveBricks } from "../field/brickPool";
-import { applyExcitations, averageFieldMetrics, sampleField } from "../field/fieldMath";
+import { applyExcitations, averageFieldMetrics, flowDiagnostics, sampleField } from "../field/fieldMath";
 import { getPresetById, SCENE_PRESETS } from "../presets";
 import { packPhotonPointSlots } from "../renderPacking";
 import { SurfaceTracker } from "../surface/surfaceTracker";
@@ -23,6 +23,7 @@ const DEFAULT_QUALITY = cloneDefaultConfig().quality;
 export class SimulationCore {
   private readonly tracker = new SurfaceTracker();
   private config: EngineConfig;
+  private targetQuality: EngineConfig["quality"];
   private preset: ScenePreset = getPresetById(SCENE_PRESETS[0].id);
   private animatedClusters: FieldClusterSpec[] = this.preset.clusters;
   private frameState: EngineFrameState;
@@ -36,6 +37,7 @@ export class SimulationCore {
 
   constructor(config?: Partial<EngineConfig>, preset?: ScenePreset) {
     this.config = mergeConfig(cloneDefaultConfig(), config);
+    this.targetQuality = structuredClone(this.config.quality);
     this.tracker.configure(this.config);
     if (preset) {
       this.preset = structuredClone(preset);
@@ -50,6 +52,8 @@ export class SimulationCore {
       averageDensity: 0,
       averageCoherence: 0,
       maxFlow: 0,
+      peakVorticity: 0,
+      peakBurst: 0,
       shellCoverage: 0,
       quality: structuredClone(this.config.quality)
     };
@@ -67,6 +71,7 @@ export class SimulationCore {
       const pointBudgetChanged =
         partial.pointBudget !== undefined && partial.pointBudget !== this.config.pointBudget;
       this.config = mergeConfig(this.config, partial);
+      this.targetQuality = structuredClone(this.config.quality);
       this.tracker.configure(this.config);
       if (pointBudgetChanged) {
         this.resetPointSlots();
@@ -126,6 +131,8 @@ export class SimulationCore {
       averageDensity: 0,
       averageCoherence: 0,
       maxFlow: 0,
+      peakVorticity: 0,
+      peakBurst: 0,
       shellCoverage: this.tracker.getCoverage(),
       quality: structuredClone(this.config.quality)
     };
@@ -183,7 +190,17 @@ export class SimulationCore {
       .filter((_, index) => index % 4 === this.frame % 4)
       .slice(0, 24)
       .map((point) => sampleField(this.animatedClusters, point.position, this.time, this.config.surfaceThreshold));
+    const diagnosticSamples = this.tracker
+      .getPoints()
+      .filter((_, index) => index % 4 === this.frame % 4)
+      .slice(0, 12)
+      .map((point) => flowDiagnostics(this.animatedClusters, point.position, this.time, this.config.surfaceThreshold));
     const metrics = averageFieldMetrics(pointSamples);
+    const peakVorticity = diagnosticSamples.reduce(
+      (maxValue, sample) => Math.max(maxValue, Math.hypot(...sample.vorticity)),
+      0
+    );
+    const peakBurst = diagnosticSamples.reduce((maxValue, sample) => Math.max(maxValue, sample.burst), 0);
     const activeBricks = buildActiveBricks(
       this.tracker.getPoints(),
       this.animatedClusters,
@@ -202,6 +219,8 @@ export class SimulationCore {
       averageDensity: metrics.rho,
       averageCoherence: metrics.coherence,
       maxFlow: metrics.maxFlow,
+      peakVorticity,
+      peakBurst,
       shellCoverage: this.tracker.getCoverage(),
       quality: structuredClone(this.config.quality)
     };
@@ -214,20 +233,43 @@ export class SimulationCore {
     );
 
     if (overload > 1.05) {
-      this.config.quality.raymarchSteps = Math.max(24, Math.floor(this.config.quality.raymarchSteps * 0.97));
-      this.config.quality.shellDensity = Math.max(0.58, this.config.quality.shellDensity * 0.992);
-      this.config.quality.pointSizeScale = Math.max(0.85, this.config.quality.pointSizeScale * 0.997);
+      if (this.config.quality.surfaceResolutionScale > 0.72) {
+        this.config.quality.surfaceResolutionScale = Math.max(
+          0.72,
+          this.config.quality.surfaceResolutionScale * 0.988
+        );
+      } else if (this.config.quality.surfaceSteps > 44) {
+        this.config.quality.surfaceSteps = Math.max(44, Math.floor(this.config.quality.surfaceSteps * 0.985));
+      } else if (this.config.quality.markerDensity > 0.04) {
+        this.config.quality.markerDensity = Math.max(0.04, this.config.quality.markerDensity * 0.985);
+      } else {
+        this.config.quality.raymarchSteps = Math.max(24, Math.floor(this.config.quality.raymarchSteps * 0.97));
+        this.config.quality.shellDensity = Math.max(0.58, this.config.quality.shellDensity * 0.992);
+        this.config.quality.pointSizeScale = Math.max(0.85, this.config.quality.pointSizeScale * 0.997);
+      }
     } else {
+      this.config.quality.surfaceResolutionScale = Math.min(
+        this.targetQuality.surfaceResolutionScale,
+        this.config.quality.surfaceResolutionScale + 0.006
+      );
+      this.config.quality.surfaceSteps = Math.min(
+        this.targetQuality.surfaceSteps,
+        this.config.quality.surfaceSteps + 1
+      );
+      this.config.quality.markerDensity = Math.min(
+        this.targetQuality.markerDensity,
+        this.config.quality.markerDensity + 0.01
+      );
       this.config.quality.raymarchSteps = Math.min(
-        DEFAULT_QUALITY.raymarchSteps,
+        this.targetQuality.raymarchSteps,
         this.config.quality.raymarchSteps + 1
       );
       this.config.quality.shellDensity = Math.min(
-        DEFAULT_QUALITY.shellDensity,
+        this.targetQuality.shellDensity,
         this.config.quality.shellDensity + 0.005
       );
       this.config.quality.pointSizeScale = Math.min(
-        DEFAULT_QUALITY.pointSizeScale,
+        this.targetQuality.pointSizeScale,
         this.config.quality.pointSizeScale + 0.003
       );
     }
